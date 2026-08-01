@@ -11,10 +11,10 @@
 #   docker compose -f docker-compose.prod.yml up -d
 #
 # Host locally:
-#   docker compose -f docker-compose.prod.yml -f docker-compose.local.yml pull
-#   docker compose -f docker-compose.prod.yml -f docker-compose.local.yml up -d
+#   docker compose -f docker-compose.prod.yml -f docker-compose.local.yml up --build -d
 #
-# Backend, frontend, and collab use pre-built images from GHCR.
+# Production self-hosting uses pre-built images from GHCR. The local override
+# builds backend, frontend, and collab from this checkout.
 #
 # Required env vars in .env:
 #   POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
