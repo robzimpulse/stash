@@ -140,9 +140,17 @@ async def resolve(user_id: UUID, prefer_provider: str | None = None) -> RunAuth:
     provider's credential, run it; a managed OpenRouter preference on Pro uses
     the managed GLM. Falls back to the user's default resolution otherwise.
     """
-    # Local dev: the machine's own harness login; inject nothing.
+    # Local dev: the machine's own harness login; inject nothing unless a
+    # local proxy is configured. `_local_exec_stream` strips ANTHROPIC_API_KEY
+    # from the inherited env, so carry the proxy config explicitly so the
+    # child claude reaches the proxy instead of the default Anthropic API.
     if settings.AGENT_EXEC_MODE == "local":
-        return RunAuth(harness=harness_mod.CLAUDE)
+        env: dict[str, str] = {}
+        if settings.ANTHROPIC_BASE_URL:
+            env["ANTHROPIC_BASE_URL"] = settings.ANTHROPIC_BASE_URL
+        if settings.ANTHROPIC_API_KEY:
+            env["ANTHROPIC_API_KEY"] = settings.ANTHROPIC_API_KEY
+        return RunAuth(harness=harness_mod.CLAUDE, env=env)
 
     if prefer_provider:
         cred = await _get_credential(user_id, prefer_provider)

@@ -337,6 +337,10 @@ class Settings:
 
     # --- LLM (Anthropic) ---
     ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
+    # Optional: point Anthropic SDK + harness CLI at a proxy (e.g. a local LLM).
+    # The SDK reads ANTHROPIC_BASE_URL from the environment itself; declaring it
+    # here lets the local-mode harness env carry it to the child claude too.
+    ANTHROPIC_BASE_URL: str | None = os.getenv("ANTHROPIC_BASE_URL")
     ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
     ANTHROPIC_FAST_MODEL: str = os.getenv("ANTHROPIC_FAST_MODEL", "claude-haiku-4-5")
 
