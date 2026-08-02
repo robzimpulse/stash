@@ -27,7 +27,8 @@ RUN groupadd --gid 1000 stash && \
 # node needed). The `stash` user (uid 1000) runs the app, so the binary must
 # be world-executable and on PATH.
 ARG CLAUDE_VERSION=2.1.181
-RUN curl -fsSL "https://github.com/anthropics/claude-code/releases/download/v${CLAUDE_VERSION}/claude-linux-arm64.tar.gz" \
+ARG TARGETARCH
+RUN curl -fsSL "https://github.com/anthropics/claude-code/releases/download/v${CLAUDE_VERSION}/claude-linux-$(if [ "${TARGETARCH}" = "amd64" ]; then echo x64; else echo ${TARGETARCH}; fi).tar.gz" \
       -o /tmp/claude.tar.gz \
     && mkdir -p /opt/claude && tar -xzf /tmp/claude.tar.gz -C /opt/claude \
     && chmod +x /opt/claude/claude && ln -s /opt/claude/claude /usr/local/bin/claude \
