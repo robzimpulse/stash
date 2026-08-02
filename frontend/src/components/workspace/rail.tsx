@@ -27,6 +27,16 @@ const PRIMARY: RailItem[] = [
 // divider falls after them, above the VFS sections.
 const DIVIDER_AFTER_INDEX = 1;
 
+// Sections with a standalone root page navigate there on tap; the rest
+// (Files/Agents) just swap the explorer beside the current path.
+const NAV_ROUTES: Partial<Record<RailSection, string>> = {
+  memory: "/memory",
+  apps: "/apps",
+  sessions: "/sessions",
+  skills: "/skills",
+  tools: "/tools",
+};
+
 function RailButton({
   item,
   active,
@@ -106,16 +116,14 @@ export default function Rail({ user, onLogout }: { user: User; onLogout: () => v
   const requestedSection = searchParams.get("section");
 
   function selectSection(section: RailSection) {
-    // Memory and Apps have their own landing pages, so they navigate; other
-    // sections just swap the explorer beside whatever's open.
-    if (section === "memory" || section === "apps") {
-      setRailSection(section);
-      router.replace(section === "memory" ? "/memory" : "/apps");
+    setRailSection(section);
+    const route = NAV_ROUTES[section];
+    if (route) {
+      router.replace(route);
       return;
     }
     const params = new URLSearchParams(searchParams);
     params.set("section", section);
-    setRailSection(section);
     router.replace(`${pathname}?${params.toString()}`);
   }
 
