@@ -138,6 +138,10 @@ services:
         condition: service_started
     env_file: .env
     environment:
+      # `.env` sets PORT=3456 (the backend's port); without this override the
+      # collab server binds 3456 while the client connects to 3458, so live
+      # editing dies with a closed connection. Pin collab to its own port.
+      PORT: "3458"
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       BACKEND_URL: http://backend:3456
 
