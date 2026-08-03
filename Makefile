@@ -12,9 +12,11 @@ up:
 down:
 	$(COMPOSE) down
 
-# Rebuild images after a Dockerfile change; `make build up` rebuilds then starts.
+# Rebuild local images from this checkout (the docker-compose.local.yml override
+# builds from ./backend/Dockerfile instead of pulling GHCR) and recreate the
+# containers whose image changed.
 build:
-	$(COMPOSE) build
+	$(COMPOSE) up -d --build
 
 # Tail all service logs.
 logs:
