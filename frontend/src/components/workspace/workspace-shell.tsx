@@ -81,6 +81,9 @@ export function rendersRouteContent(
   workspaceParam: string | null,
 ): boolean {
   if (selectedSection) return false;
+  // /files is the FileBrowser page (grid/list/column + per-item delete) —
+  // the Files home the sidebar rail navigates to.
+  if (pathname === "/files") return true;
   if (pathname === "/sessions") return workspaceParam !== "1";
   // Memory routes (brain dashboard, wiki file system) render as pages
   // beside the explorer; opening an item switches to the workbench.

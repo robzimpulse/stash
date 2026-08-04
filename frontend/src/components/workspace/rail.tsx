@@ -28,8 +28,9 @@ const PRIMARY: RailItem[] = [
 const DIVIDER_AFTER_INDEX = 1;
 
 // Sections with a standalone root page navigate there on tap; the rest
-// (Files/Agents) just swap the explorer beside the current path.
+// (Agents) just swap the explorer beside the current path.
 const NAV_ROUTES: Partial<Record<RailSection, string>> = {
+  files: "/files",
   memory: "/memory",
   apps: "/apps",
   sessions: "/sessions",

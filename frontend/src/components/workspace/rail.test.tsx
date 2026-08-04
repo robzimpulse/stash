@@ -39,9 +39,9 @@ describe("Rail navigation", () => {
     expect(replace).toHaveBeenCalledWith("/tools");
   });
 
-  it("keeps Files on the current path via ?section= (no regression)", () => {
+  it("navigates to /files when Files is tapped", () => {
     render(<Rail user={{ display_name: "A", name: "a", email: "" } as never} onLogout={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Files" }));
-    expect(replace).toHaveBeenCalledWith("/p/123?section=files");
+    expect(replace).toHaveBeenCalledWith("/files");
   });
 });
