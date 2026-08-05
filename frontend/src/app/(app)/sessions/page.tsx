@@ -28,6 +28,7 @@ import {
 } from "@/lib/api";
 import SessionFolderShareModal from "@/components/share/SessionFolderShareModal";
 import { usePins } from "@/lib/pins";
+import { closeSessionTabs } from "@/lib/workspace-store";
 import {
   groupSessionsByAgent,
   groupSessionsByDayAndUser,
@@ -202,6 +203,7 @@ export default function SkillSessionsPage() {
       for (const session of targets) {
         await deleteSession(session.id!);
       }
+      closeSessionTabs(targets.map((s) => s.session_id));
       clearSelection();
       await load();
       // FolderDrill holds its own list and only refetches when this key bumps;

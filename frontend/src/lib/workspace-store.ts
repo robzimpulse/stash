@@ -159,3 +159,17 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
 
   hydrate: (data) => set({ ...data }),
 }));
+
+/**
+ * Close every open workbench tab for the given session ids. Session tabs keep
+ * their (kind, refId) reference after the session is gone, so a deleted session
+ * would otherwise stay visible in the tab strip and redirect to a dead page.
+ * Call this after a session is deleted (list bulk delete or detail-page delete).
+ */
+export function closeSessionTabs(sessionIds: Iterable<string>): void {
+  const { tabs, closeTab } = useWorkspace.getState();
+  const deleted = new Set(sessionIds);
+  for (const tab of tabs) {
+    if (tab.kind === "session" && deleted.has(tab.refId)) closeTab(tab.id);
+  }
+}

@@ -201,3 +201,13 @@ Default to surfacing uncertainty, not hiding it.
   broken". Fix: mirror `moveSelectedToFolder` and `setDrillRefresh(n => n + 1)` after deletes, and
   verify with a browser click-through (folder-scoped refetch fires, row count drops). General rule:
   any mutation that can run while a drill is open must bump the same key the move path uses.
+- **2026-08-05 — Workbench session tabs survive deletion and become dead "breadcrumbs".**
+  The tab strip (`moltchat_workspace` localStorage, `workspace-store.ts`) keeps a `session` tab for
+  every session you open; nothing closed it when the session was deleted, so the deleted session
+  stayed visible in the tab strip and clicking it redirected to a dead page. Also, a session whose
+  transcript 404s (e.g. only a `session_end` event) rendered no header actions at all — no Delete —
+  because `SessionClient.load` failed atomically. Fix: `closeSessionTabs(sessionIds)` helper closed
+  from both delete paths (list bulk delete + detail-page delete), and `load` now renders the detail
+  (with Delete) even when only the transcript fails. General rule: any UI surface that persists a
+  reference to a deleted object must close/revalidate that reference at delete time; and never let
+  one failing sub-request disable every action on the page.
