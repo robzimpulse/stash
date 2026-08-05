@@ -194,3 +194,10 @@ Default to surfacing uncertainty, not hiding it.
   the harness env (`STASH_URL`/`STASH_API_KEY` in `agent_auth.resolve`), not
   inherited from the host. Verify by rebuilding the image and triggering
   `stash memory --recompute`.
+- **2026-08-05 — Folder drills keep their own session list; every mutation must bump `drillRefresh`.**
+  `/sessions` renders through `FolderDrill`, whose `folderSessions` state only refetches when its
+  `refreshKey` prop bumps. `bulkDeleteSessions` refreshed the landing `load()` but never bumped the
+  key, so a 204 delete left the row visible until the drill remounted — users read it as "delete is
+  broken". Fix: mirror `moveSelectedToFolder` and `setDrillRefresh(n => n + 1)` after deletes, and
+  verify with a browser click-through (folder-scoped refetch fires, row count drops). General rule:
+  any mutation that can run while a drill is open must bump the same key the move path uses.
