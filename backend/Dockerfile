@@ -34,6 +34,11 @@ RUN curl -fsSL "https://github.com/anthropics/claude-code/releases/download/v${C
     && chmod +x /opt/claude/claude && ln -s /opt/claude/claude /usr/local/bin/claude \
     && rm -f /tmp/claude.tar.gz
 
+# The stash CLI — the local-mode harness (curator included) reaches the user's
+# Stash with it, and the sprite seed installs the same PyPI package on cloud
+# boxes, so the image must ship it too.
+RUN pip install --no-cache-dir stashai
+
 WORKDIR /app
 
 COPY backend/requirements.txt .

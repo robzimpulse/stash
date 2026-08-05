@@ -373,6 +373,10 @@ class Settings:
     SPRITES_STASH_API_URL: str | None = parse_required_when_enabled(
         "SPRITES_STASH_API_URL", AGENT_EXEC_MODE == "sprites", "AGENT_EXEC_MODE=sprites"
     )
+    # What the local-mode harness's stash CLI calls back to (direct host runs
+    # use localhost; docker-compose sets http://backend:3456 so the worker
+    # container can reach the backend service).
+    STASH_URL: str = os.getenv("STASH_URL", f"http://localhost:{PORT}")
     AGENT_TURN_TIMEOUT_SECONDS: int = int(os.getenv("AGENT_TURN_TIMEOUT_SECONDS", "600"))
 
 

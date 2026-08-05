@@ -185,3 +185,12 @@ If you genuinely think a convention is harmful, surface it. Don't fork silently.
 "Completed" is wrong if anything was skipped silently.
 "Tests pass" is wrong if any were skipped.
 Default to surfacing uncertainty, not hiding it.
+
+## Lessons learned
+- **2026-08-05 — Local-mode agents can't see the host's CLIs.** The Memory
+  curator runs inside the backend/worker container (`AGENT_EXEC_MODE=local`),
+  so every CLI its prompt depends on must be installed in `backend/Dockerfile`
+  (the `stash` CLI was missing → "command not found") and authenticated via
+  the harness env (`STASH_URL`/`STASH_API_KEY` in `agent_auth.resolve`), not
+  inherited from the host. Verify by rebuilding the image and triggering
+  `stash memory --recompute`.

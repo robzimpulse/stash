@@ -73,6 +73,9 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
+      # Where a local-mode agent's stash CLI reaches this backend from inside
+      # the compose network (mirrors BACKEND_INTERNAL_URL used by frontend).
+      STASH_URL: http://backend:3456
     volumes:
       - backend_secrets:/app/.secrets
     healthcheck:
@@ -96,6 +99,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
+      STASH_URL: http://backend:3456
     volumes:
       - backend_secrets:/app/.secrets
     command: ["celery", "-A", "backend.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
@@ -112,6 +116,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
+      STASH_URL: http://backend:3456
     volumes:
       - backend_secrets:/app/.secrets
     command: ["celery", "-A", "backend.celery_app", "beat", "--loglevel=info"]
