@@ -787,7 +787,7 @@ function SessionTableRow({
         <div className="mt-0.5 truncate text-[11px] text-muted-foreground md:hidden">
           {[user, ticket?.ticket_identifier, agent, formatRelative(session.last_event_at)]
             .filter(Boolean)
-            .join(" · ")}
+            .join(", ")}
         </div>
       </div>
       <span className="hidden min-w-0 md:block">
@@ -950,7 +950,7 @@ function FolderAccessBadge({ folder }: { folder: SessionFolder }) {
         className="inline-block h-[7px] w-[7px] rounded-full"
         style={{ background: VIS_DOT[vis] }}
       />
-      {vis === "shared" ? `Shared · ${folder.share_count}` : "Public"}
+      {vis === "shared" ? `Shared: ${folder.share_count}` : "Public"}
     </span>
   );
 }
@@ -1062,7 +1062,6 @@ function FolderCard({
           </span>
           {displayVisibility(folder.access, folder.share_count) !== "private" && (
             <>
-              <span aria-hidden className="text-muted-foreground">·</span>
               <FolderAccessBadge folder={folder} />
             </>
           )}

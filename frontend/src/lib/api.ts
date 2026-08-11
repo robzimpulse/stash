@@ -37,7 +37,6 @@ function trackEvent(
   if (typeof window === "undefined") return;
   void import("./analytics").then((m) => m.track(event, properties, opts));
 }
-const DEFAULT_LOCAL_COLLAB_URL = "ws://localhost:3458";
 
 // --- Token management (for CLI API key fallback) ---
 
@@ -99,17 +98,6 @@ export function getAgentApiKey(): string | null {
 
 export async function getAuthToken(): Promise<string | null> {
   return getToken() ?? (await getAuth0AccessToken());
-}
-
-export function getCollabUrl(): string {
-  const configured = process.env.NEXT_PUBLIC_COLLAB_URL?.trim();
-  if (configured) return configured.replace(/\/$/, "");
-  if (typeof window === "undefined") return DEFAULT_LOCAL_COLLAB_URL;
-  if (["localhost", "127.0.0.1"].includes(window.location.hostname)) {
-    return DEFAULT_LOCAL_COLLAB_URL;
-  }
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/collab`;
 }
 
 export class ApiError extends Error {
@@ -345,6 +333,38 @@ export async function listSources(): Promise<Source[]> {
   return data.sources.filter((s) => !NATIVE_SOURCE_TYPES.has(s.type));
 }
 
+// One node in a source's entry tree (GET /me/sources/tree). Directories carry
+// `children`; a capped directory ends with a {kind: "truncated", hidden: N}
+// marker so renderers can say "+N more" honestly.
+export interface SourceTreeEntry {
+  name: string;
+  kind: string; // 'folder' | 'file' | 'page' | 'session' | 'truncated' | ...
+  path?: string;
+  ref?: string;
+  hidden?: number;
+  source?: string; // connection handle, on multi-connection member folders
+  sync_status?: string | null;
+  children?: SourceTreeEntry[];
+}
+
+export interface SourceTreeRoot {
+  source: string; // provider key ("github") or native handle
+  type: string; // 'provider' | 'native_files' | 'native_sessions'
+  provider?: string;
+  display_name: string;
+  members?: { handle: string; display_name: string }[];
+  sync_status?: string | null;
+  last_synced_at?: string | null;
+  tree: SourceTreeEntry[];
+}
+
+export async function getSourcesTree(depth = 4): Promise<SourceTreeRoot[]> {
+  const data = await apiFetch<{ sources: SourceTreeRoot[] }>(`${ME}/sources/tree?depth=${depth}`);
+  // Files and sessions render from their own richer endpoints; this call is
+  // for the connected-source trees.
+  return data.sources.filter((s) => s.type === "provider");
+}
+
 export async function addSource(body: {
   source_type: string;
   external_ref?: string;
@@ -437,13 +457,21 @@ export interface SourceSearchResponse {
 
 export async function searchSource(
   query: string,
-  opts: { source?: string; includeSources?: string[]; limit?: number } = {},
+  opts: {
+    source?: string;
+    includeSources?: string[];
+    limit?: number;
+    modifiedAfter?: string;
+    modifiedBefore?: string;
+  } = {},
 ): Promise<SourceSearchResponse> {
   const params = new URLSearchParams({ q: query });
   if (opts.source) params.set("source", opts.source);
   // Repeated params — the endpoint declares include_sources as a list.
   for (const token of opts.includeSources ?? []) params.append("include_sources", token);
   if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+  if (opts.modifiedAfter) params.set("modified_after", opts.modifiedAfter);
+  if (opts.modifiedBefore) params.set("modified_before", opts.modifiedBefore);
   return apiFetch<SourceSearchResponse>(`${ME}/sources/search?${params.toString()}`);
 }
 
@@ -499,42 +527,6 @@ export function githubOwner(sourceGithubUrl: string): string {
   return sourceGithubUrl.replace("https://github.com/", "").split("/")[0];
 }
 
-// --- Home feed ---
-
-// An item from the caller's own stash the feed resurfaces: an old doc, file,
-// memory page, or clip (opens in-app via app_url) or an X/Instagram save
-// (opens the original via external_url; the archived text is the preview).
-export interface ResurfaceCardData {
-  source: "x" | "instagram" | "clip" | "doc" | "file" | "memory";
-  title: string;
-  preview: string;
-  saved_at: string;
-  app_url: string | null;
-  external_url: string | null;
-  image_url: string | null;
-}
-
-export type FeedItem =
-  | { kind: "skill"; data: PublicSkillCard }
-  | { kind: "public_page"; data: PublicPageCard }
-  | { kind: "resurface"; data: ResurfaceCardData };
-
-export interface HomeFeedPage {
-  items: FeedItem[];
-  next_cursor: number | null;
-}
-
-// Public for signed-out visitors (community stream only); a bearer token adds
-// resurfaced items from the caller's own stash.
-export async function getHomeFeed(cursor: number): Promise<HomeFeedPage> {
-  const token = await getAuthToken();
-  const res = await fetch(`${API_BASE}/api/v1/feed?cursor=${cursor}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-  });
-  if (!res.ok) throw new Error(`Feed failed: ${res.status}`);
-  return res.json();
-}
-
 // --- Files: folders (nested) and pages ---
 
 export async function getTree(): Promise<Tree> {
@@ -566,9 +558,20 @@ export async function getMemoryGraph(): Promise<WikiGraph> {
   return apiFetch(`${ME}/memory-graph`);
 }
 
-// The Memory wiki as a nested file-system tree, rooted at the Memory folder.
-export async function getMemoryTree(): Promise<Tree> {
-  return apiFetch(`${ME}/memory-tree`);
+// --- Curator log ---
+
+// One curator run: what the night's curation learned — the run's stored
+// final message, one sentence by prompt contract.
+export interface CuratorLogEntry {
+  session_id: string;
+  started_at: string;
+  status: "completed" | "failed" | "stopped" | "interrupted" | "running";
+  summary: string | null;
+  error: string | null;
+}
+
+export async function getCuratorLog(): Promise<{ entries: CuratorLogEntry[] }> {
+  return apiFetch(`${ME}/curator-log`);
 }
 
 export async function createFolder(
@@ -582,6 +585,39 @@ export async function createFolder(
       parent_folder_id: parentFolderId || null,
     }),
   });
+}
+
+// Create a skill (folder + SKILL.md) server-side. The name is uniquified
+// against existing root folders, so this never fails on a name collision.
+export async function createSkill(
+  name: string,
+  description: string,
+): Promise<{ folder_id: string; name: string }> {
+  return apiFetch(`${ME}/skills/new`, {
+    method: "POST",
+    body: JSON.stringify({ name, description }),
+  });
+}
+
+// Promote a plain folder to a skill (and give it starter instructions if it
+// has none). Membership is a stored flag now — writing a SKILL.md into a
+// folder no longer promotes it.
+export async function convertFolderToSkill(
+  folderId: string,
+  description: string,
+): Promise<{ folder_id: string; name: string; is_skill: boolean }> {
+  return apiFetch(`${ME}/folders/${folderId}/convert-to-skill`, {
+    method: "POST",
+    body: JSON.stringify({ description }),
+  });
+}
+
+// Demote a skill back to a plain folder. Contents are untouched — it simply
+// stops appearing under Skills and stops loading for agents.
+export async function convertSkillToFolder(
+  folderId: string
+): Promise<{ folder_id: string; name: string; is_skill: boolean }> {
+  return apiFetch(`${ME}/folders/${folderId}/convert-to-folder`, { method: "POST" });
 }
 
 export async function updateFolder(
@@ -633,7 +669,6 @@ export async function updatePage(
     name?: string;
     folder_id?: string | null;
     content?: string;
-    collab_projection?: boolean;
     content_type?: "markdown" | "html";
     content_html?: string;
     html_layout?: "responsive" | "fixed-aspect" | "full-width";
@@ -645,7 +680,7 @@ export async function updatePage(
     body: JSON.stringify(data),
   });
   // Only count actual content/title changes as "edits." Folder moves,
-  // collab_projection passes, and pure layout flips are uninteresting.
+  // conflict-refused saves, and pure layout flips are uninteresting.
   const isContentEdit =
     data.content !== undefined ||
     data.content_html !== undefined ||
@@ -1009,9 +1044,16 @@ async function uploadAny(
   const formData = new FormData();
   formData.append("file", file);
   if (folderId) formData.append("folder_id", folderId);
+  // Hand-rolled fetch (FormData must set its own Content-Type), so the scope
+  // header has to be attached here too — without it the server resolves the
+  // upload to the personal scope and rejects any workspace-scoped folder_id.
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const scopeUserId = getScopeUserId();
+  if (scopeUserId) headers[SCOPE_HEADER] = scopeUserId;
   const resp = await fetch(`${API_BASE}${ME}/files`, {
     method: "POST",
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    headers,
     body: formData,
   });
   if (!resp.ok) {
@@ -1089,6 +1131,9 @@ export async function uploadFileOrPage(
       content_markdown: result.content_markdown ?? "",
       content_html: result.content_html ?? "",
       html_layout: "responsive",
+      content_hash: null,
+      // The uploader owns what they just uploaded.
+      can_write: true,
       created_by: result.created_by ?? "",
       updated_by: null,
       created_at: result.created_at,
@@ -1276,12 +1321,14 @@ export interface LinearTicketLabel {
 export async function listMySessions(
   limit = 50,
   sessionFolderId?: string,
-  offset = 0
+  offset = 0,
+  sessionIdPrefix?: string
 ): Promise<SessionSummary[]> {
   const qs = new URLSearchParams();
   qs.set("limit", String(limit));
   if (offset) qs.set("offset", String(offset));
   if (sessionFolderId) qs.set("session_folder_id", sessionFolderId);
+  if (sessionIdPrefix) qs.set("session_id_prefix", sessionIdPrefix);
   const data = await apiFetch<{ sessions: SessionSummary[] }>(
     `${ME}/sessions?${qs.toString()}`
   );
@@ -1684,8 +1731,10 @@ export async function listAgentNames(): Promise<string[]> {
   return data.agent_names;
 }
 
-// --- Activity feed ---
+// --- File activity feed ---
 
+// A page edit or file upload in the filesystem (the Memory subtree is
+// excluded server-side — curation output is the curator log's story).
 export interface ActivityEvent {
   kind: string;
   ts: string;
@@ -1702,12 +1751,12 @@ export interface ActivityFeed {
   has_more: boolean;
 }
 
-export async function listActivity(
+export async function listFileActivity(
   opts: { limit?: number; before?: string } = {}
 ): Promise<ActivityFeed> {
   const qs = new URLSearchParams({ limit: String(opts.limit ?? 50) });
   if (opts.before) qs.set("before", opts.before);
-  return apiFetch(`${ME}/activity?${qs}`);
+  return apiFetch(`${ME}/file-activity?${qs}`);
 }
 
 // --- Session transcripts ---
@@ -1788,9 +1837,15 @@ export async function uploadTranscript(
   formData.append("agent_name", agentName);
   if (cwd) formData.append("cwd", cwd);
 
+  // Hand-rolled fetch (FormData); the scope header must ride along or the
+  // server files the transcript under the personal scope.
+  const transcriptHeaders: Record<string, string> = {};
+  if (token) transcriptHeaders["Authorization"] = `Bearer ${token}`;
+  const transcriptScope = getScopeUserId();
+  if (transcriptScope) transcriptHeaders[SCOPE_HEADER] = transcriptScope;
   const resp = await fetch(`${API_BASE}${ME}/transcripts`, {
     method: "POST",
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    headers: transcriptHeaders,
     body: formData,
   });
   if (!resp.ok) {
@@ -1875,6 +1930,8 @@ export async function getSidebar(): Promise<Sidebar> {
   const token = await getAuthToken();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  const sidebarScope = getScopeUserId();
+  if (sidebarScope) headers[SCOPE_HEADER] = sidebarScope;
   if (_sidebarEtag) headers["If-None-Match"] = _sidebarEtag;
 
   const res = await fetch(`${API_BASE}${ME}/sidebar`, {
@@ -2168,6 +2225,14 @@ export type Agent = {
   telegram_bound: boolean;
   last_run_at: string | null;
   last_run_error: string | null;
+  last_run_outcome:
+    | "started"
+    | "ran"
+    | "failed"
+    | "skipped_credits"
+    | "skipped_no_credential"
+    | "skipped_no_changes"
+    | null;
   curated_through: string | null;
 };
 

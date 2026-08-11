@@ -76,8 +76,17 @@ class FakeClient:
                         "name": "diagram.txt",
                         "folder_id": None,
                         "size_bytes": 12,
+                        "content_type": "text/plain",
                         "created_at": "2026-04-20T12:00:00Z",
-                    }
+                    },
+                    {
+                        "id": "pdffile-12345678",
+                        "name": "catalog.pdf",
+                        "folder_id": None,
+                        "size_bytes": 9,
+                        "content_type": "application/pdf",
+                        "created_at": "2026-04-20T12:00:00Z",
+                    },
                 ],
             },
             "skills": [
@@ -105,8 +114,12 @@ class FakeClient:
         return {"content_type": "markdown", "content_markdown": "# Plan\n", "content_html": ""}
 
     def download_file(self, file_id):
-        assert file_id == "file-12345678"
-        return b"diagram body"
+        assert file_id in ("file-12345678", "pdffile-12345678")
+        return b"%PDF raw" if file_id == "pdffile-12345678" else b"diagram body"
+
+    def get_file_text(self, file_id):
+        assert file_id == "pdffile-12345678"
+        return {"text": "# Catalog\n| part | cross |\n", "status": "done"}
 
     def get_skill_text(self, slug):
         assert slug == "demo-stash"
@@ -147,6 +160,10 @@ class FakeClient:
         self.scan_at_call["read_source_doc"] = self.scan
         return {"content": f"BODY of {ref}"}
 
+    def download_source_doc(self, source, ref):
+        assert source == "src-gmail-1"
+        return f"RAW BYTES of {ref}".encode()
+
     def get_transcript_events(self, session_id):
         assert session_id == "session-abc"
         return [{"role": "user", "content": "hello", "created_at": "2026-05-19T10:00:00Z"}]
@@ -160,7 +177,15 @@ class FakeClient:
 
     def list_tables(self):
         self.internal_at_call["list_tables"] = self.internal
-        return [{"id": "table-12345678", "name": "Ideas", "columns": [], "row_count": 1}]
+        return [
+            {
+                "id": "table-12345678",
+                "name": "Ideas",
+                "folder_id": "folder-12345678",
+                "columns": [],
+                "row_count": 1,
+            }
+        ]
 
     def get_table(self, table_id):
         assert table_id == "table-12345678"
@@ -220,12 +245,13 @@ def test_vfs_exposes_user_sections():
         "memory",
         "sessions",
         "skills",
-        "tables",
         "sources",
     }
     assert model.read_file("/skills/Demo Skill.md") == b"# Demo Stash\n"
     assert b"hello" in model.read_file("/sessions/Fix login/transcript.md")
-    assert b'"Name": "Mount"' in model.read_file("/tables/Ideas/rows.json")
+    # Tables are not a segregated section — they live in their folder like
+    # everything else.
+    assert b'"Name": "Mount"' in model.read_file("/files/Notes/Ideas/rows.json")
 
     # Connected sources are mounted read-only under their provider folder;
     # native sources are skipped (files/sessions already appear above). A sole
@@ -335,9 +361,70 @@ def test_vfs_reads_files_and_pages():
     assert model.read_file(f"{folder_path}/{page_name}") == b"# Plan\n"
 
 
+def test_read_raw_fetches_source_doc_original_bytes():
+    """`cat` on a connected-source document shows its extracted text; read_raw
+    must return the provider's original bytes instead — that's the whole
+    difference between reading about a PDF and downloading the PDF."""
+    model = _model()
+    gmail_dir = "/sources/gmail"
+    doc_name = next(name for name in model.list_dir(gmail_dir) if name.startswith("Welcome"))
+
+    assert model.read_file(f"{gmail_dir}/{doc_name}") == b"BODY of msg-1"
+    assert model.read_raw(f"{gmail_dir}/{doc_name}") == b"RAW BYTES of msg-1"
+
+
+def test_binary_upload_reads_as_sidecar_and_downloads_as_original():
+    """`cat` on an uploaded PDF must never flood a shell with raw bytes — it
+    shows the extracted sidecar text, exactly like a connected-source document.
+    The original stays one `read_raw` away."""
+    model = _model()
+    pdf_name = next(name for name in model.list_dir("/files") if name.startswith("catalog"))
+
+    assert model.read_file(f"/files/{pdf_name}") == b"# Catalog\n| part | cross |\n"
+    assert model.read_raw(f"/files/{pdf_name}") == b"%PDF raw"
+
+
+class UnextractedPdfClient(FakeClient):
+    def get_file_text(self, file_id):
+        return {"text": None, "status": "pending"}
+
+
+def test_unextracted_binary_upload_says_so_instead_of_dumping_bytes():
+    """Extraction hasn't run yet (or produced nothing): the reader gets told
+    loudly, with the escape hatches named — never silence, never mojibake."""
+    model = StashVfsModel(UnextractedPdfClient(), include_computer=True)
+    model.refresh()
+    pdf_name = next(name for name in model.list_dir("/files") if name.startswith("catalog"))
+
+    text = model.read_file(f"/files/{pdf_name}").decode()
+    assert "no extracted text" in text
+    assert "stash download" in text
+
+
+def test_text_upload_reads_and_downloads_the_same_bytes():
+    """A text upload's bytes ARE its content — read_raw and read_file must
+    agree, so `download` never invents a second body for a node."""
+    model = _model()
+    upload_name = next(name for name in model.list_dir("/files") if name.startswith("diagram"))
+
+    assert model.read_file(f"/files/{upload_name}") == b"diagram body"
+    assert model.read_raw(f"/files/{upload_name}") == b"diagram body"
+
+
+def test_read_raw_of_a_directory_raises():
+    model = _model()
+
+    try:
+        model.read_raw("/files")
+        raise AssertionError("expected IsADirectoryError")
+    except IsADirectoryError:
+        pass
+
+
 class DuplicateNameClient(FakeClient):
-    """Two tables share a name — the backend allows it. Only the colliding pair
-    should carry an id suffix; the uniquely-named table stays clean."""
+    """Two root tables share a name — the backend allows that across folders.
+    Only the colliding pair should carry an id suffix; the uniquely-named
+    table stays clean."""
 
     def list_tables(self):
         return [
@@ -351,7 +438,7 @@ def test_vfs_suffixes_only_colliding_names():
     model = StashVfsModel(DuplicateNameClient(), include_computer=True)
     model.refresh()
 
-    entries = set(model.list_dir("/tables"))
+    entries = set(model.list_dir("/files"))
 
     # The unique name is clean; both members of the collision are suffixed with
     # their own id (not just the second one), so neither path depends on order.
@@ -359,6 +446,32 @@ def test_vfs_suffixes_only_colliding_names():
     assert "Untitled table--aaaaaaaa" in entries
     assert "Untitled table--bbbbbbbb" in entries
     assert "Untitled table" not in entries
+
+
+class SkillFolderTableClient(FakeClient):
+    """A table filed inside a skill folder, alongside a normal one. Tables come
+    from their own listing, which does not hide skill subtrees the way the
+    overview's file tree does — so this table names a folder the files tree
+    never mentions."""
+
+    def list_tables(self):
+        return [
+            {"id": "skilltable-99999999", "name": "Rubrics", "folder_id": "skillfolder-12345678"},
+            *super().list_tables(),
+        ]
+
+
+def test_a_table_inside_a_skill_folder_does_not_break_the_mount():
+    """A skill's folder subtree is deliberately absent from /files, so a table
+    filed there has no path to mount at. It has to be left out rather than take
+    the whole tree down: every VFS command rebuilds this model, so one such
+    table turned every `stash vfs` call into a crash."""
+    model = StashVfsModel(SkillFolderTableClient(), include_computer=True)
+    model.refresh()
+
+    assert "Rubrics" not in model.list_dir("/files")
+    # The tables that do have a home are unaffected — the skip is surgical.
+    assert b'"Name": "Mount"' in model.read_file("/files/Notes/Ideas/rows.json")
 
 
 class CountingLoaderClient(FakeClient):

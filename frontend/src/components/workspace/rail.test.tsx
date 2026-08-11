@@ -9,10 +9,16 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
 }));
 
-vi.mock("@/lib/workspace-store", () => ({
-  useWorkspace: (selector: (s: unknown) => unknown) =>
-    selector({ setRailSection: vi.fn() }),
-}));
+const useWorkspace = vi.fn((selector: (s: unknown) => unknown) =>
+  selector({ setRailSection: vi.fn() }),
+);
+// The VFS branch reads getState().lastVfsUrl when the user is not already in
+// the VFS; provide it so the mock holds whichever branch the pathname hits.
+(useWorkspace as unknown as { getState: () => unknown }).getState = () => ({
+  lastVfsUrl: "/files",
+});
+
+vi.mock("@/lib/workspace-store", () => ({ useWorkspace }));
 
 import Rail from "./rail";
 
@@ -39,9 +45,9 @@ describe("Rail navigation", () => {
     expect(replace).toHaveBeenCalledWith("/tools");
   });
 
-  it("navigates to /files when Files is tapped", () => {
+  it("navigates to /files when VFS is tapped", () => {
     render(<Rail user={{ display_name: "A", name: "a", email: "" } as never} onLogout={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Files" }));
+    fireEvent.click(screen.getByRole("button", { name: "VFS" }));
     expect(replace).toHaveBeenCalledWith("/files");
   });
 });

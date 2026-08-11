@@ -8,14 +8,7 @@ import {
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SkillsPage from "./page";
-import {
-  createFolder,
-  createPage,
-  listSkills,
-  type Skill,
-} from "@/lib/api";
-import type { Page } from "@/lib/types";
-import { skillMdTemplate } from "@/lib/localSkill";
+import { createSkill, listSkills, type Skill } from "@/lib/api";
 import { ConfirmDialogProvider } from "@/components/ConfirmDialog";
 
 function render(ui: ReactNode) {
@@ -28,6 +21,7 @@ const router = vi.hoisted(() => ({
 
 vi.mock("next/navigation", () => ({
   useRouter: () => router,
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 vi.mock("next/link", () => ({
@@ -54,8 +48,7 @@ vi.mock("@/lib/api", () => ({
       this.status = status;
     }
   },
-  createFolder: vi.fn(),
-  createPage: vi.fn(),
+  createSkill: vi.fn(),
   deleteFolder: vi.fn(),
   forkSkill: vi.fn(),
   listSkills: vi.fn(),
@@ -159,28 +152,33 @@ describe("SkillsPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("creates a New Skill folder with a SKILL.md and navigates to it", async () => {
-    vi.stubGlobal("prompt", vi.fn(() => "My Skill"));
-    vi.mocked(createFolder).mockResolvedValue({
-      id: "folder-9",
-      owner_user_id: "user-1",
-      name: "My Skill",
-      parent_folder_id: null,
-      created_by: "user-1",
-      created_at: "",
-      updated_at: "",
-    });
-    vi.mocked(createPage).mockResolvedValue({ id: "page-9" } as unknown as Page);
+  it("creates the skill through the inline composer and navigates to it", async () => {
+    vi.mocked(createSkill).mockResolvedValue({ folder_id: "folder-9", name: "My Skill" });
 
     render(<SkillsPage />);
 
     fireEvent.click(await screen.findByRole("button", { name: /New Skill/ }));
 
-    await waitFor(() => expect(createFolder).toHaveBeenCalledWith("My Skill"));
-    expect(createPage).toHaveBeenCalledWith(
-      "SKILL.md",
-      "folder-9",
-      skillMdTemplate("My Skill"),
+    // Both fields are required: a skill can never be created without the
+    // agent-trigger description. Submitting incomplete shows why instead of
+    // silently ignoring the click (a disabled button reads as broken).
+    const create = await screen.findByRole("button", { name: "Create skill" });
+    fireEvent.click(create);
+    expect(createSkill).not.toHaveBeenCalled();
+    expect(screen.getByText("Give the skill a name.")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "My Skill" } });
+    fireEvent.click(create);
+    expect(createSkill).not.toHaveBeenCalled();
+    expect(
+      screen.getByText("Describe when an agent should use it — this is required."),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("When should an agent use it?"), {
+      target: { value: "Use for release planning." },
+    });
+    fireEvent.click(create);
+
+    await waitFor(() =>
+      expect(createSkill).toHaveBeenCalledWith("My Skill", "Use for release planning."),
     );
     await waitFor(() =>
       expect(router.push).toHaveBeenCalledWith("/skills/folder/folder-9"),

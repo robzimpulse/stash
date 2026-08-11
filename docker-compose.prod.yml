@@ -11,10 +11,10 @@
 #   docker compose -f docker-compose.prod.yml up -d
 #
 # Host locally:
-#   docker compose -f docker-compose.prod.yml -f docker-compose.local.yml up --build -d
+#   docker compose -f docker-compose.prod.yml -f docker-compose.local.yml pull
+#   docker compose -f docker-compose.prod.yml -f docker-compose.local.yml up -d
 #
-# Production self-hosting uses pre-built images from GHCR. The local override
-# builds backend, frontend, and collab from this checkout.
+# Backend and frontend use pre-built images from GHCR.
 #
 # Required env vars in .env:
 #   POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
@@ -60,7 +60,7 @@ services:
       retries: 5
 
   backend:
-    image: ghcr.io/fergana-labs/stash-backend:0.1.362
+    image: ghcr.io/fergana-labs/stash-backend:0.1.364
     restart: always
     expose:
       - "3456"
@@ -86,6 +86,28 @@ services:
       start_period: 30s
 
   worker:
+    image: ghcr.io/fergana-labs/stash-backend:0.1.364
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - backend_secrets:/app/.secrets
+    command: ["celery", "-A", "backend.celery_app", "worker", "--loglevel=info", "--concurrency=4", "-Q", "default"]
+
+  # Long-running tasks (renders, extractions, crawls, agent runs) get their
+  # own pool so beat sweeps and cheap tasks on "default" never queue behind
+  # a 30-min task. Concurrency 2 keeps 2 children x 800MB (see
+  # worker_max_memory_per_child) plus the parent inside a 2GB box.
+  heavy-worker:
     image: ghcr.io/fergana-labs/stash-backend:0.1.362
     restart: always
     depends_on:
@@ -102,10 +124,10 @@ services:
       STASH_URL: http://backend:3456
     volumes:
       - backend_secrets:/app/.secrets
-    command: ["celery", "-A", "backend.celery_app", "worker", "--loglevel=info", "--concurrency=4"]
+    command: ["celery", "-A", "backend.celery_app", "worker", "--loglevel=info", "--concurrency=2", "-Q", "heavy"]
 
   beat:
-    image: ghcr.io/fergana-labs/stash-backend:0.1.362
+    image: ghcr.io/fergana-labs/stash-backend:0.1.364
     restart: always
     depends_on:
       redis:
@@ -122,7 +144,7 @@ services:
     command: ["celery", "-A", "backend.celery_app", "beat", "--loglevel=info"]
 
   frontend:
-    image: ghcr.io/fergana-labs/stash-frontend:0.1.362
+    image: ghcr.io/fergana-labs/stash-frontend:0.1.364
     restart: always
     expose:
       - "3457"
@@ -130,25 +152,6 @@ services:
       - backend
     environment:
       BACKEND_INTERNAL_URL: http://backend:3456
-
-  collab:
-    image: ghcr.io/fergana-labs/stash-collab:0.1.362
-    restart: always
-    expose:
-      - "3458"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      backend:
-        condition: service_started
-    env_file: .env
-    environment:
-      # `.env` sets PORT=3456 (the backend's port); without this override the
-      # collab server binds 3456 while the client connects to 3458, so live
-      # editing dies with a closed connection. Pin collab to its own port.
-      PORT: "3458"
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      BACKEND_URL: http://backend:3456
 
   caddy:
     image: caddy:2-alpine
@@ -163,7 +166,6 @@ services:
     depends_on:
       - backend
       - frontend
-      - collab
 
 volumes:
   postgres_data:

@@ -47,6 +47,10 @@ class VfsNode:
     # Provider-side id of a connected-source document (a Drive file id, a Gmail
     # message id, …), so `stat` can tie a VFS path back to the provider object.
     external_ref: str | None = None
+    # Fetches the original bytes behind this node when they differ from what
+    # `cat` shows — the provider document behind a connected-source text, the
+    # uploaded binary behind a sidecar. None means the content IS the original.
+    raw_loader: BytesLoader | None = None
     # Stash id of the connected source this node is the root of. It's the object
     # id `shares add source <id>` takes, so `stat` surfaces it for sharing.
     source_id: str | None = None
@@ -111,7 +115,11 @@ class StashVfsModel:
                     "",
                     "- `files` exposes folders, pages, and uploaded files.",
                     "- `memory` is the agent-curated Memory wiki (stored separately from `files`).",
-                    "- Sessions, skills, and tables are read-only projections.",
+                    "- Sessions and skills are read-only projections.",
+                    "- Tables live in the folder tree like any other item: a "
+                    "table is a `<name>/` directory holding `schema.json`, "
+                    "`rows.json`, and `rows.jsonl`. Query tables with SQL via "
+                    "`stash sql`.",
                     "- `sources` exposes connected integrations (Gmail, "
                     "GitHub, Slack, Jira, …) as read-only documents.",
                     *computer_lines,
@@ -151,6 +159,19 @@ class StashVfsModel:
                 node.content = node.loader()
                 node.size_hint = len(node.content)
         return node.content
+
+    def read_raw(self, path: str) -> bytes:
+        """The original bytes behind a node. Binary documents — connected-source
+        files and uploads alike — come back verbatim (the PDF itself, not its
+        extracted text), so a vision-capable agent can look at the actual pages.
+        Everything else's bytes ARE its content (pages and transcripts are
+        text), so this reads the same body `cat` shows."""
+        node = self._get_node(path)
+        if not node.is_file:
+            raise IsADirectoryError(path)
+        if node.raw_loader is not None:
+            return node.raw_loader()
+        return self.read_file(path)
 
     def prefetch(self, paths: list[str]) -> None:
         """Load these files' bodies concurrently, so a later `read_file` on each
@@ -218,10 +239,9 @@ class StashVfsModel:
         overview = self.client.get_overview()
         memory_folder_id = str(self.client.get_memory_folder()["id"])
 
-        self._add_files_tree(overview.get("files", {}), memory_folder_id)
+        self._add_files_tree(overview.get("files", {}), memory_folder_id, self.client.list_tables())
         self._add_skills(overview.get("skills", []))
         self._add_sessions(overview.get("sessions", []))
-        self._add_tables()
         self._add_sources()
         # /computer appears only for users whose cloud computer actually
         # exists — the overview flag is a DB lookup, so deciding this never
@@ -259,7 +279,7 @@ class StashVfsModel:
                     size_hint=entry.get("size"),
                 )
 
-    def _add_files_tree(self, tree: dict, memory_folder_id: str) -> None:
+    def _add_files_tree(self, tree: dict, memory_folder_id: str, tables: list[dict]) -> None:
         root_path = "/files"
         self._add_dir(root_path)
         # The Memory wiki is stored as a reserved folder in the files tree but
@@ -272,7 +292,7 @@ class StashVfsModel:
         # entries — the overview omits them. The page's markdown links them by
         # download URL and `stash files download` fetches the bytes.
         files = tree.get("files", [])
-        ambiguous = _files_ambiguity(folders.values(), pages, files)
+        ambiguous = _files_ambiguity(folders.values(), pages, files, tables)
         folder_paths: dict[str, str] = {}
 
         def siblings(parent_id) -> set[str]:
@@ -323,13 +343,71 @@ class StashVfsModel:
             # Uploaded files are immutable — there is no separate update event,
             # so the file's last-modified time is its creation time.
             created_at = file.get("created_at")
+            # A binary upload reads as its extracted sidecar text — `cat` on a
+            # PDF must never flood a context window with raw bytes — while the
+            # original stays reachable through `read_raw` / `stash download`,
+            # mirroring connected-source documents exactly.
+            if _is_binary_upload(file.get("content_type")):
+                loader = lambda fid=file_id: self._load_file_sidecar(fid)  # noqa: E731
+                raw_loader = lambda fid=file_id: self.client.download_file(fid)  # noqa: E731
+            else:
+                loader = lambda fid=file_id: self.client.download_file(fid)  # noqa: E731
+                raw_loader = None
             self._add_file(
                 f"{parent_path}/{name}",
-                loader=lambda fid=file_id: self.client.download_file(fid),
+                loader=loader,
+                raw_loader=raw_loader,
                 size_hint=file.get("size_bytes"),
                 created_at=created_at,
                 updated_at=created_at,
                 app_url=f"/f/{file_id}",
+            )
+
+        # Tables live in the same folder tree as pages and files — a table
+        # about jobs belongs in the jobs folder. Each projects as a directory
+        # holding its schema and row dumps; `stash sql` queries them directly.
+        for table in tables:
+            table_id = str(table["id"])
+            parent_id = table.get("folder_id")
+            # The table listing is its own endpoint and does not hide skill
+            # subtrees the way the overview's file tree does, so a table filed
+            # inside a skill names a folder that has no path here. Its whole
+            # subtree is projected under /skills, not /files — skip it rather
+            # than crash the mount on the missing folder.
+            if parent_id and str(parent_id) not in folders and str(parent_id) != memory_folder_id:
+                continue
+            parent_path = folder_path(str(parent_id)) if parent_id else root_path
+            created_at = table.get("created_at")
+            updated_at = table.get("updated_at")
+            name = _dir_display_name(table.get("name") or "table", table_id, siblings(parent_id))
+            table_path = self._add_dir_child(
+                parent_path,
+                name,
+                created_at=created_at,
+                updated_at=updated_at,
+            )
+            self._add_file(
+                f"{table_path}/schema.json",
+                loader=lambda tid=table_id: _json_bytes(self.client.get_table(tid)),
+                created_at=created_at,
+                updated_at=updated_at,
+                app_url=f"/tables/{table_id}",
+            )
+            self._add_file(
+                f"{table_path}/rows.json",
+                loader=lambda tid=table_id: _json_bytes(self._load_all_table_rows(tid)),
+                created_at=created_at,
+                updated_at=updated_at,
+                app_url=f"/tables/{table_id}",
+            )
+            self._add_file(
+                f"{table_path}/rows.jsonl",
+                loader=lambda tid=table_id: _jsonl_bytes(
+                    self._load_all_table_rows(tid).get("rows", [])
+                ),
+                created_at=created_at,
+                updated_at=updated_at,
+                app_url=f"/tables/{table_id}",
             )
 
     def _add_skills(self, skills: list[dict]) -> None:
@@ -387,49 +465,6 @@ class StashVfsModel:
                 ),
                 updated_at=updated_at,
                 app_url=f"/sessions/{session_id}",
-            )
-
-    def _add_tables(self) -> None:
-        tables_path = "/tables"
-        self._add_dir(tables_path)
-        tables = self.client.list_tables()
-        self._add_jsonl_file(f"{tables_path}/_index.jsonl", tables)
-        ambiguous = _ambiguous_basenames(
-            [_safe_name(table.get("name") or "table") for table in tables]
-        )
-        for table in tables:
-            table_id = str(table["id"])
-            created_at = table.get("created_at")
-            updated_at = table.get("updated_at")
-            name = _dir_display_name(table.get("name") or "table", table_id, ambiguous)
-            table_path = self._add_dir_child(
-                tables_path,
-                name,
-                created_at=created_at,
-                updated_at=updated_at,
-            )
-            self._add_file(
-                f"{table_path}/schema.json",
-                loader=lambda tid=table_id: _json_bytes(self.client.get_table(tid)),
-                created_at=created_at,
-                updated_at=updated_at,
-                app_url=f"/tables/{table_id}",
-            )
-            self._add_file(
-                f"{table_path}/rows.json",
-                loader=lambda tid=table_id: _json_bytes(self._load_all_table_rows(tid)),
-                created_at=created_at,
-                updated_at=updated_at,
-                app_url=f"/tables/{table_id}",
-            )
-            self._add_file(
-                f"{table_path}/rows.jsonl",
-                loader=lambda tid=table_id: _jsonl_bytes(
-                    self._load_all_table_rows(tid).get("rows", [])
-                ),
-                created_at=created_at,
-                updated_at=updated_at,
-                app_url=f"/tables/{table_id}",
             )
 
     def _add_sources(self) -> None:
@@ -548,6 +583,19 @@ class StashVfsModel:
             size_hint=entry.get("size"),
             updated_at=entry.get("external_updated_at"),
             external_ref=entry.get("external_ref") or None,
+            raw_loader=lambda h=handle, r=ref: self.client.download_source_doc(h, r),
+        )
+
+    def _load_file_sidecar(self, file_id: str) -> bytes:
+        """A binary upload's extracted text. When there is none, say so and
+        point at the escape hatch — never dump raw bytes into a shell."""
+        doc = self.client.get_file_text(file_id)
+        if doc.get("text"):
+            return _text_bytes(doc["text"])
+        status = doc.get("status") or "missing"
+        return _text_bytes(
+            f"[binary file: no extracted text (extraction {status}). "
+            "Fetch the original with `stash download <path>`.]\n"
         )
 
     def _load_page(self, page_id: str) -> bytes:
@@ -613,6 +661,7 @@ class StashVfsModel:
         created_at: str | None = None,
         updated_at: str | None = None,
         external_ref: str | None = None,
+        raw_loader: BytesLoader | None = None,
         app_url: str | None = None,
     ) -> str:
         path = self._clean_path(path)
@@ -632,6 +681,7 @@ class StashVfsModel:
             created_at=_parse_iso(created_at),
             updated_at=_parse_iso(updated_at),
             external_ref=external_ref,
+            raw_loader=raw_loader,
             app_url=app_url,
         )
         self.nodes[parent].children[name] = path
@@ -736,6 +786,18 @@ def _group_by_provider(connected: list[dict]) -> dict[str, list[dict]]:
     return groups
 
 
+# Upload content types whose bytes are directly readable text. Everything else
+# (PDFs, Office files, images, archives) reads as its extracted sidecar.
+_TEXT_UPLOAD_TYPES = ("application/json", "application/xml")
+
+
+def _is_binary_upload(content_type: str | None) -> bool:
+    ct = (content_type or "").lower().split(";")[0].strip()
+    if not ct:
+        return False
+    return not (ct.startswith("text/") or ct in _TEXT_UPLOAD_TYPES)
+
+
 def _source_doc_text(doc: dict) -> str:
     return doc.get("content") or doc.get("transcript") or ""
 
@@ -771,10 +833,12 @@ def _page_extension(page: dict) -> str:
     return ".html" if (page.get("content_type") or "markdown") == "html" else ".md"
 
 
-def _files_ambiguity(folders, pages: list[dict], files: list[dict]) -> dict[str, set[str]]:
+def _files_ambiguity(
+    folders, pages: list[dict], files: list[dict], tables: list[dict]
+) -> dict[str, set[str]]:
     """Map each parent folder (keyed by id, "" for root) to the set of colliding
-    display names among its folders, pages, and uploaded files combined — paths
-    in one directory must be unique across all three kinds."""
+    display names among its folders, pages, uploaded files, and tables combined —
+    paths in one directory must be unique across all four kinds."""
     by_parent: dict[str, list[str]] = {}
 
     def record(parent_id, base: str) -> None:
@@ -788,6 +852,8 @@ def _files_ambiguity(folders, pages: list[dict], files: list[dict]) -> dict[str,
     for file in files:
         stem, extension = _split_filename(file.get("name") or "file", "")
         record(file.get("folder_id"), f"{stem}{extension}")
+    for table in tables:
+        record(table.get("folder_id"), _safe_name(table.get("name") or "table"))
     return {parent: _ambiguous_basenames(names) for parent, names in by_parent.items()}
 
 

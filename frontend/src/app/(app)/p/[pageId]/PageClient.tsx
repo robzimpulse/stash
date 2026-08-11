@@ -23,7 +23,7 @@ import HtmlPageView, {
 import ExportDeckButton from "@/components/export/ExportDeckButton";
 import ResourceShareButton from "@/components/share/ResourceShareButton";
 import FileViewerHeader from "@/components/content/FileViewerHeader";
-import { sectionCrumbs, useMemoryFolderId } from "@/lib/memory-folder";
+import { sectionCrumbs } from "@/lib/memory-folder";
 import MarkdownEditor, {
   extractCommentIdsFromMarkdown,
   type SaveStatus,
@@ -53,6 +53,7 @@ import { findInSkillContents } from "@/lib/localSkill";
 import { getScope, getScopeUserId, setScope } from "@/lib/scope-store";
 import type { CommentThread, Page, Scope, Workspace } from "@/lib/types";
 import { subscribePageEvents } from "@/lib/pageEvents";
+import { useTabTitle } from "@/lib/workspace-store";
 
 function wrapHtml(title: string, body: string): string {
   // HTML pages can be stored as a full document (when imported from .html
@@ -105,6 +106,7 @@ export default function SkillPageView({ pageId }: { pageId: string }) {
   const skillSlug = searchParams.get("skill");
 
   const [page, setPage] = useState<Page | null>(null);
+  useTabTitle("page", pageId, page?.name.replace(/\.md$/, ""));
   // The scope is the current user. Empty until auth resolves — every
   // consumer below renders or fires only after that.
   const scopeId = user?.id ?? "";
@@ -197,11 +199,16 @@ export default function SkillPageView({ pageId }: { pageId: string }) {
   const [externalEdit, setExternalEdit] = useState<{ agentName: string | null } | null>(null);
   const liveViewRef = useRef({ isHtml: false, htmlEditMode: false });
   const loadRef = useRef<() => Promise<void>>(async () => {});
+  // Hashes this tab's own saves produced. Every save is broadcast back to
+  // the whole scope, so without this the tab would flag its own echo as an
+  // external edit.
+  const ownContentHashes = useRef(new Set<string>());
 
   useEffect(() => {
     if (!user || skillSlug) return;
     return subscribePageEvents((evt) => {
       if (evt.page_id !== pageId) return;
+      if (evt.content_hash && ownContentHashes.current.has(evt.content_hash)) return;
       const { isHtml, htmlEditMode } = liveViewRef.current;
       if (isHtml && !htmlEditMode) {
         loadRef.current();
@@ -212,11 +219,7 @@ export default function SkillPageView({ pageId }: { pageId: string }) {
     });
   }, [scopeId, pageId, user, skillSlug]);
 
-  const memoryFolderId = useMemoryFolderId();
-  const ancestorCrumbs = useMemo(
-    () => sectionCrumbs(folderChain, memoryFolderId),
-    [folderChain, memoryFolderId],
-  );
+  const ancestorCrumbs = useMemo(() => sectionCrumbs(folderChain), [folderChain]);
 
   useBreadcrumbs(
     [
@@ -334,11 +337,15 @@ export default function SkillPageView({ pageId }: { pageId: string }) {
       const seq = saveSeq.current + 1;
       saveSeq.current = seq;
       try {
-        const updated = await updatePage(pageId, {
-          content,
-          collab_projection: true,
-        });
+        // The human's save always lands, even over an agent's concurrent
+        // write — agents are the guarded, retrying party (they send
+        // expected_content_hash; this tab deliberately does not).
+        const updated = await updatePage(pageId, { content });
+        if (updated.content_hash) ownContentHashes.current.add(updated.content_hash);
         if (saveSeq.current === seq) setPage(updated);
+        // The buffer just became the page, so an "edited externally" banner
+        // would now describe a version this save overwrote.
+        setExternalEdit(null);
         reconcileAfterSave(content, "markdown");
       } catch (e) {
         setError(e instanceof Error ? e.message : "Save failed");
@@ -818,16 +825,7 @@ export default function SkillPageView({ pageId }: { pageId: string }) {
                 <MarkdownEditor
                   file={page}
                   onSave={handleSave}
-                  collaborationUser={{
-                    id: user.id,
-                    name: user.display_name || user.name,
-                  }}
                   onSaveStatusChange={setSaveStatus}
-                  onNavigateInternal={(href) => router.push(href)}
-                  onAddComment={handleAddCommentMarkdown}
-                  onActivateThread={setActiveThreadId}
-                  activeThreadId={activeThreadId}
-                  stripCommentToken={stripCommentToken}
                 />
               )
             ) : null}
@@ -1058,7 +1056,7 @@ function SkillFallbackPageView({
           {page.name || "(untitled)"}
         </h1>
         <div className="mt-1 text-[11.5px] uppercase tracking-wide text-muted-foreground">
-          page · read-only via Skill
+          page, read-only via Skill
         </div>
         <div className="mt-6">
           <PageBody page={page} />

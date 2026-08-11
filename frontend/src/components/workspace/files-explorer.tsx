@@ -76,7 +76,6 @@ export default function FilesExplorer({
   onRoot,
   rootLabel = "Files",
   rootFolderId = null,
-  hideFolderId = null,
   loadRoot,
   loadFolder,
   loadShared,
@@ -85,16 +84,12 @@ export default function FilesExplorer({
   showImport = true,
   importIntent = "files",
   vfsWritable = true,
-  headerAction,
-  confirmMemoryWrites = false,
   tabSection,
 }: {
   onRoot: () => void;
   rootLabel?: string;
   /** Folder this explorer is rooted at (null = the VFS root). */
   rootFolderId?: string | null;
-  /** A root-level folder to hide from the listing (e.g. Memory hidden from Files). */
-  hideFolderId?: string | null;
   /** Workspace section stamped on opened tab URLs (?section=) — without it the
    *  shell derives the section from the path, which lands Memory items in
    *  Files (all folder/page routes are files-shaped). */
@@ -108,8 +103,10 @@ export default function FilesExplorer({
    *  explorer's root; omitted, the section has no shared surface at all. */
   loadShared?: () => Promise<Item[]>;
   /** At a virtual root (loadRoot), the "create" action for that root's native item
-   *  (e.g. New skill) — replaces new-file/folder/upload, which need a real folder. */
-  newRootItem?: { label: string; run: () => Promise<void> };
+   *  (e.g. New skill) — replaces new-file/folder/upload, which need a real folder.
+   *  Returning the created Item makes the explorer open it and highlight its
+   *  row; returning void leaves the list refresh as the only effect. */
+  newRootItem?: { label: string; run: () => Promise<Item | void> };
   /** Double-clicking the root crumb can open a native overview tab. */
   openRootTab?: () => void;
   /** Show the GitHub import button. Default true. */
@@ -121,14 +118,6 @@ export default function FilesExplorer({
   /** This section can create VFS items (new file/folder/upload). Default true;
    *  Sessions is a read-through view, so false. */
   vfsWritable?: boolean;
-  /** A labeled section-specific action on its own row under the toolbar (e.g.
-   *  Memory's "Curate wiki"). The toolbar row itself can't fit a labeled
-   *  button — its action cluster doesn't shrink, so it would overflow the
-   *  sidebar. */
-  headerAction?: { icon: React.ReactNode; label: string; run: () => void };
-  /** Memory is the curator agent's knowledge base, so a manual write there is
-   *  unusual: confirm it first and offer to send the item to Files instead. */
-  confirmMemoryWrites?: boolean;
 }) {
   const router = useRouter();
   const { user } = useAuth();
@@ -145,6 +134,10 @@ export default function FilesExplorer({
   const [menu, setMenu] = useState<Menu>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [creatingRoot, setCreatingRoot] = useState(false);
+  // Row to visually call out after a create, so the new item is findable in a
+  // long list. Cleared on a timer.
+  const [highlightId, setHighlightId] = useState<string | null>(null);
   const [sort, setSort] = useState<Sort>("name");
   const [importOpen, setImportOpen] = useState(false);
   const [repoUrl, setRepoUrl] = useState("");
@@ -153,9 +146,6 @@ export default function FilesExplorer({
   // but empty; stays null when GitHub isn't connected → URL paste only).
   const [githubRepos, setGithubRepos] = useState<GithubImportRepo[] | null>(null);
   const [repoFilter, setRepoFilter] = useState("");
-  // A write action waiting on the "Add to Memory?" confirmation. `run` receives
-  // the destination folder: the browsed Memory folder, or null for Files root.
-  const [pendingWrite, setPendingWrite] = useState<{ run: (folder: string | null) => Promise<void> } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -182,7 +172,7 @@ export default function FilesExplorer({
         const tree = await getTree();
         setCrumbs([]);
         setItems([
-          ...tree.folders.filter((f) => f.id !== hideFolderId).map((f) => ({ kind: "folder" as const, id: f.id, name: f.name, ts: f.updated_at, readOnly: f.is_protected })),
+          ...tree.folders.map((f) => ({ kind: "folder" as const, id: f.id, name: f.name, ts: f.updated_at, readOnly: f.is_protected })),
           ...tree.pages.map((p) => ({ kind: "page" as const, id: p.id, name: p.name || "Untitled", ts: p.updated_at })),
           ...(await sharedNode()),
         ]);
@@ -203,7 +193,7 @@ export default function FilesExplorer({
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
     }
-  }, [folderId, hideFolderId, loadRoot, loadFolder, loadShared, sharedNode]);
+  }, [folderId, loadRoot, loadFolder, loadShared, sharedNode]);
 
   useEffect(() => { setItems(null); load(); }, [load]);
   useEffect(() => {
@@ -222,7 +212,7 @@ export default function FilesExplorer({
     const kind = item.kind === "folder" ? "folder" : item.kind === "skill" ? "skill" : item.kind === "session" ? "session" : item.kind === "table" ? "table" : item.kind === "page" ? "page" : "file";
     // Plain click navigates the current tab; cmd/ctrl-click (or the explicit
     // "Open in new tab" menu item) opens a new one.
-    openTab(kind, item.id, item.name, { newTab: opts?.forceNewTab || opensNewTab() });
+    openTab(kind, item.id, { title: item.name, newTab: opts?.forceNewTab || opensNewTab() });
     const suffix = tabSection ? `?section=${tabSection}` : "";
     router.replace(urlForTab({ kind, refId: item.id }) + suffix);
   }
@@ -256,15 +246,23 @@ export default function FilesExplorer({
     await load();
   }
 
+  // Rename and delete can be refused with an explanation the user needs to
+  // read (a skill's SKILL.md can't be renamed or deleted; Memory can't be
+  // touched at all). Swallowing those rejections is how "I click and nothing
+  // happens" bugs are born — surface them.
   async function rename(item: Item, name: string) {
     setRenaming(null);
     if (!name.trim() || name === item.name) return;
-    if (item.kind === "folder" || item.kind === "skill") await updateFolder(item.id, { name });
-    else if (item.kind === "session-folder") await updateSessionFolder(item.id, { name });
-    else if (item.kind === "session") return;
-    else if (item.kind === "page") await updatePage(item.id, { name });
-    else if (item.kind === "table") await updateTable(item.id, { name });
-    else await updateFile(item.id, { name });
+    try {
+      if (item.kind === "folder" || item.kind === "skill") await updateFolder(item.id, { name });
+      else if (item.kind === "session-folder") await updateSessionFolder(item.id, { name });
+      else if (item.kind === "session") return;
+      else if (item.kind === "page") await updatePage(item.id, { name });
+      else if (item.kind === "table") await updateTable(item.id, { name });
+      else await updateFile(item.id, { name });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Rename failed");
+    }
     await load();
   }
 
@@ -272,19 +270,17 @@ export default function FilesExplorer({
     // The shared node is an index, not a thing — Delete is hidden on readOnly
     // rows, so reaching here at all is a bug rather than a user action.
     if (item.kind === "shared-root") throw new Error("The shared index cannot be deleted");
-    if (item.kind === "folder" || item.kind === "skill") await deleteFolder(item.id);
-    else if (item.kind === "session-folder") await deleteSessionFolder(item.id);
-    else if (item.kind === "table") await deleteTable(item.id);
-    else await trashItem(item.kind, item.id); // page | file | session
+    try {
+      if (item.kind === "folder" || item.kind === "skill") await deleteFolder(item.id);
+      else if (item.kind === "session-folder") await deleteSessionFolder(item.id);
+      else if (item.kind === "table") await deleteTable(item.id);
+      else await trashItem(item.kind, item.id); // page | file | session
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Delete failed");
+    }
     await load();
   }
 
-  // In Memory, every create/upload goes through the "Add to Memory?" dialog;
-  // everywhere else the action runs immediately in the browsed folder.
-  function guardWrite(run: (folder: string | null) => Promise<void>) {
-    if (confirmMemoryWrites) setPendingWrite({ run });
-    else void run(folderId);
-  }
   async function newDoc(contentType: "markdown" | "html", folder: string | null) {
     const p = await createPage("Untitled", folder, "", { content_type: contentType });
     await load();
@@ -297,7 +293,29 @@ export default function FilesExplorer({
     openAsTab({ kind: "table", id: t.id, name: t.name });
   }
   async function newFolder(folder: string | null) { await createFolder("New folder", folder); await load(); }
-  async function runNewRootItem() { if (!newRootItem) return; await newRootItem.run(); await load(); }
+  async function runNewRootItem() {
+    if (!newRootItem || creatingRoot) return;
+    setCreatingRoot(true);
+    let created: Item | void;
+    try {
+      created = await newRootItem.run();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : `${newRootItem.label} failed`);
+      return;
+    } finally {
+      setCreatingRoot(false);
+    }
+    await load();
+    if (!created) return;
+    const item = created;
+    toast.success(`Created ${item.name}`);
+    // Land the user on the new item: its row is highlighted (and scrolled to —
+    // an alphabetical list files "New skill" below the fold) and it opens as a
+    // tab, ready to rename. Without this the click reads as a no-op.
+    setHighlightId(item.id);
+    setTimeout(() => setHighlightId((h) => (h === item.id ? null : h)), 3000);
+    openAsTab(item);
+  }
   async function uploadFiles(files: File[], folder: string | null) {
     const label = files.length === 1 ? files[0].name : `${files.length} files`;
     const toastId = toast.loading(`Uploading ${label}…`);
@@ -313,7 +331,7 @@ export default function FilesExplorer({
     const files = Array.from(e.target.files ?? []);
     if (fileRef.current) fileRef.current.value = "";
     if (files.length === 0) return;
-    guardWrite((folder) => uploadFiles(files, folder));
+    void uploadFiles(files, folderId);
   }
   async function doImport(url?: string) {
     const target = (url ?? repoUrl).trim();
@@ -399,8 +417,8 @@ export default function FilesExplorer({
         <div className="ml-auto flex shrink-0 items-center gap-0.5">
           {inSharedIndex ? null : atVirtualRoot ? (
             newRootItem && (
-              <button title={newRootItem.label} aria-label={newRootItem.label} onClick={runNewRootItem} className="flex h-7 items-center gap-1 rounded px-1.5 text-[12px] text-sidebar-foreground hover:bg-sidebar-accent">
-                <FolderPlus className="h-4 w-4" /><Plus className="h-2.5 w-2.5" />
+              <button title={newRootItem.label} aria-label={newRootItem.label} onClick={runNewRootItem} disabled={creatingRoot} className="flex h-7 cursor-pointer items-center gap-1 rounded px-1.5 text-[12px] text-sidebar-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground disabled:cursor-default disabled:opacity-50">
+                {creatingRoot ? <Loader2 className="h-4 w-4 animate-spin" /> : <><FolderPlus className="h-4 w-4" /><Plus className="h-2.5 w-2.5" /></>}
               </button>
             )
           ) : vfsWritable ? (
@@ -412,12 +430,12 @@ export default function FilesExplorer({
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => guardWrite((f) => newDoc("markdown", f))}><FileText className="h-4 w-4" /> Markdown page</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => guardWrite((f) => newDoc("html", f))}><Code2 className="h-4 w-4" /> HTML page</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => guardWrite(newTableItem)}><Table2 className="h-4 w-4" /> Table</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => void newDoc("markdown", folderId)}><FileText className="h-4 w-4" /> Markdown page</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => void newDoc("html", folderId)}><Code2 className="h-4 w-4" /> HTML page</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => void newTableItem(folderId)}><Table2 className="h-4 w-4" /> Table</DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
-              <ToolBtn icon={<FolderPlus className="h-4 w-4" />} label="New folder" onClick={() => guardWrite(newFolder)} />
+              <ToolBtn icon={<FolderPlus className="h-4 w-4" />} label="New folder" onClick={() => void newFolder(folderId)} />
               <ToolBtn icon={<Upload className="h-4 w-4" />} label="Upload" onClick={() => fileRef.current?.click()} />
             </>
           ) : null}
@@ -436,15 +454,6 @@ export default function FilesExplorer({
           <input ref={fileRef} type="file" multiple className="hidden" onChange={onUpload} />
         </div>
       </div>
-
-      {headerAction && (
-        <div className="shrink-0 border-b border-[var(--divider-color)] px-2 py-1.5">
-          <button onClick={headerAction.run} className="flex h-7 w-full items-center justify-center gap-1.5 rounded border border-sidebar-border text-[12px] text-sidebar-foreground hover:bg-sidebar-accent">
-            {headerAction.icon}
-            {headerAction.label}
-          </button>
-        </div>
-      )}
 
       {/* List — root is also a drop target (move to root) */}
       <div
@@ -471,9 +480,11 @@ export default function FilesExplorer({
               onClick={() => onRowClick(item)}
               onDoubleClick={() => onRowDoubleClick(item)}
               onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, item }); }}
+              ref={item.id === highlightId ? (el) => el?.scrollIntoView({ block: "nearest" }) : undefined}
               className={cn(
-                "group flex cursor-pointer items-center gap-1.5 rounded px-2 py-1 text-[13px] text-sidebar-foreground hover:bg-sidebar-accent",
+                "group flex cursor-pointer items-center gap-1.5 rounded px-2 py-1 text-[13px] text-sidebar-foreground transition-colors hover:bg-sidebar-accent",
                 dropTarget === item.id && "ring-1 ring-brand-400",
+                item.id === highlightId && "bg-brand-400/15 ring-1 ring-brand-400",
               )}
               title={item.name}
             >
@@ -526,29 +537,6 @@ export default function FilesExplorer({
           </div>
         </div>
       )}
-
-      <Dialog open={!!pendingWrite} onOpenChange={(open) => { if (!open) setPendingWrite(null); }}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Add to Memory?</DialogTitle></DialogHeader>
-          <p className="text-[13px] text-muted-foreground">
-            Memory is your curator agent&apos;s knowledge base — it&apos;s usually maintained
-            automatically, not by hand. Most files belong in Files.
-          </p>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => { const w = pendingWrite!; setPendingWrite(null); void w.run(folderId); }}
-            >
-              Add to Memory anyway
-            </Button>
-            <Button
-              onClick={async () => { const w = pendingWrite!; setPendingWrite(null); await w.run(null); toast.success("Added to Files"); }}
-            >
-              Add to Files instead
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       <Dialog open={importOpen} onOpenChange={setImportOpen}>
         <DialogContent>
