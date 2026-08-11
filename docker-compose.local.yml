@@ -19,6 +19,11 @@ services:
       context: .
       dockerfile: backend/Dockerfile
 
+  heavy-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+
   beat:
     build:
       context: .
@@ -32,13 +37,6 @@ services:
         BACKEND_INTERNAL_URL: http://backend:3456
     ports:
       - "3457:3457"
-
-  collab:
-    build:
-      context: ./collab
-      dockerfile: Dockerfile
-    ports:
-      - "3458:3458"
 
   caddy:
     profiles:
