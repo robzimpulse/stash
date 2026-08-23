@@ -56,6 +56,8 @@ async def _list_sessions(owner_user_id: UUID, user_id: UUID) -> list[dict]:
             "size_bytes": int(s["size_bytes"] or 0),
             "last_at": s["last_at"],
             "updated_at": s["last_at"],
+            "end_user_external_id": s["end_user_external_id"],
+            "end_user_name": s["end_user_name"],
         }
         for s in sessions
     ]
@@ -95,8 +97,11 @@ async def _files_tree(owner_user_id: UUID, user_id: UUID) -> dict:
             # Embedded files (owner_page_id) are internals of their page, not
             # tree entries — the overview only carries filed files.
             "SELECT fi.id, fi.name, fi.folder_id, fi.size_bytes, "
-            "       fi.content_type, fi.created_at, fi.linked_table_id "
-            f"FROM files fi WHERE fi.owner_user_id = $1 AND fi.deleted_at IS NULL "
+            "       fi.content_type, fi.created_at, fi.linked_table_id, "
+            "       eu.external_id AS end_user_external_id "
+            "FROM files fi "
+            "LEFT JOIN end_users eu ON eu.id = fi.end_user_id "
+            f"WHERE fi.owner_user_id = $1 AND fi.deleted_at IS NULL "
             f"AND fi.owner_page_id IS NULL AND {readable_file} ORDER BY fi.created_at DESC",
             owner_user_id,
             user_id,
@@ -142,6 +147,7 @@ async def _files_tree(owner_user_id: UUID, user_id: UUID) -> dict:
                 "url": None,
                 "created_at": f["created_at"],
                 "linked_table_id": str(f["linked_table_id"]) if f["linked_table_id"] else None,
+                "end_user_external_id": f["end_user_external_id"],
             }
             for f in file_rows
         ],
@@ -421,18 +427,14 @@ async def _sidebar_etag(owner_user_id: UUID, user_id: UUID) -> str:
           (SELECT COUNT(*) FROM history_events he
             WHERE he.owner_user_id = $1 AND he.session_id IS NOT NULL
             AND {memory_service.readable_session_event_condition("he", 2)})        AS hc,
-          (SELECT MAX(stt.updated_at) FROM session_titles stt
-           JOIN sessions stt_session
-             ON stt_session.owner_user_id = stt.owner_user_id
-            AND stt_session.session_id = stt.session_id
-           WHERE stt.owner_user_id = $1
+          (SELECT MAX(stt_session.title_updated_at) FROM sessions stt_session
+           WHERE stt_session.owner_user_id = $1
+             AND stt_session.title IS NOT NULL
              AND stt_session.deleted_at IS NULL
              AND {memory_service.readable_session_event_condition("stt_session", 2)}) AS tt,
-          (SELECT COUNT(*) FROM session_titles stt
-           JOIN sessions stt_session
-             ON stt_session.owner_user_id = stt.owner_user_id
-            AND stt_session.session_id = stt.session_id
-           WHERE stt.owner_user_id = $1
+          (SELECT COUNT(*) FROM sessions stt_session
+           WHERE stt_session.owner_user_id = $1
+             AND stt_session.title IS NOT NULL
              AND stt_session.deleted_at IS NULL
              AND {memory_service.readable_session_event_condition("stt_session", 2)}) AS tc,
           (SELECT MAX(updated_at) FROM skills WHERE owner_user_id = $1)            AS st,

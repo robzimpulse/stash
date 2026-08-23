@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useBreadcrumbs } from "@/components/BreadcrumbContext";
@@ -21,11 +22,12 @@ import {
   materializeSession,
   renameSession,
   trashItem,
+  type FolderBackedSkill,
   type SessionDetail,
   type SessionEvent,
-  type Skill,
 } from "@/lib/api";
 import EditableTitle from "@/components/content/EditableTitle";
+import { getScope } from "@/lib/scope-store";
 import { closeSessionTabs, useTabTitle } from "@/lib/workspace-store";
 
 // One transcript page. The viewer loads this many turns at a time and fetches
@@ -72,6 +74,17 @@ function cleanSessionTitle(title: string): string {
 function sessionHeading(detail: SessionDetail | null, sessionId: string): string {
   const raw = (detail?.title || sessionId).trim();
   return cleanSessionTitle(raw) || sessionId.replace(/^acme-/, "");
+}
+
+// A session is named by its title everywhere a person sees it, so the file
+// they end up with on disk is named that way too.
+function transcriptFilename(detail: SessionDetail, sessionId: string): string {
+  const name = sessionHeading(detail, sessionId)
+    .replace(/[/\\:*?"<>|]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+  return `${name}.jsonl`;
 }
 
 function eventToTurn(ev: SessionEvent): MessageTurn {
@@ -127,6 +140,13 @@ export default function SessionViewerPage({ sessionId }: { sessionId: string }) 
 
   const [agentName, setAgentName] = useState("");
   const [sessionDetail, setSessionDetail] = useState<SessionDetail | null>(null);
+  // The developer console has no sidebar entry for an open transcript, so it
+  // needs a way back to the list. Resolved in an effect to match the
+  // server-rendered markup (the scope lives in localStorage).
+  const [inDeveloperConsole, setInDeveloperConsole] = useState(false);
+  useEffect(() => {
+    setInDeveloperConsole(getScope()?.view === "developer");
+  }, []);
   useTabTitle("session", sessionId, sessionDetail && sessionHeading(sessionDetail, sessionId));
   const [turns, setTurns] = useState<MessageTurn[]>([]);
   const [totalTurns, setTotalTurns] = useState(0);
@@ -137,7 +157,7 @@ export default function SessionViewerPage({ sessionId }: { sessionId: string }) 
   useBreadcrumbs(
     [
       { label: "Sessions" },
-      { label: sessionDetail ? sessionHeading(sessionDetail, sessionId) : `#${sessionId}` },
+      { label: sessionDetail ? sessionHeading(sessionDetail, sessionId) : "Session" },
     ],
     `session/${sessionId}`
   );
@@ -175,16 +195,16 @@ export default function SessionViewerPage({ sessionId }: { sessionId: string }) 
             {
               label: "Download transcript (.jsonl)",
               onSelect: async () => {
-                const path = `/api/v1/me/transcripts/${encodeURIComponent(
+                const path = `/api/v1/me/transcripts/export.jsonl?session_id=${encodeURIComponent(
                   sessionId
-                )}/export.jsonl`;
+                )}`;
                 const res = await fetchAuthed(path);
                 if (!res.ok) return;
                 const blob = await res.blob();
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
                 a.href = url;
-                a.download = `session-${sessionId}.jsonl`;
+                a.download = transcriptFilename(sessionDetail, sessionId);
                 document.body.appendChild(a);
                 a.click();
                 a.remove();
@@ -196,7 +216,7 @@ export default function SessionViewerPage({ sessionId }: { sessionId: string }) 
               destructive: true,
               onSelect: async () => {
                 const ok = await confirm({
-                  title: `Move session "${sessionId}" to trash?`,
+                  title: `Move session "${sessionHeading(sessionDetail, sessionId)}" to trash?`,
                   confirmLabel: "Delete",
                 });
                 if (!ok) return;
@@ -290,6 +310,15 @@ export default function SessionViewerPage({ sessionId }: { sessionId: string }) 
     <div className="scroll-thin flex-1 overflow-y-auto">
       <div className="mx-auto grid max-w-[1100px] gap-7 px-12 pb-20 pt-7 lg:grid-cols-[minmax(0,1fr)_260px]">
         <main className="min-w-0">
+          {inDeveloperConsole && (
+            <Link
+              href="/developer/sessions"
+              className="mb-4 inline-flex items-center gap-1.5 text-[13px] text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              All sessions
+            </Link>
+          )}
           <div className="mb-2 border-b border-border pb-3.5">
             {(sessionDetail?.linear_tickets.length ?? 0) > 0 && (
               <div className="mb-1.5 flex items-center gap-2">
@@ -377,7 +406,7 @@ function SaveToSkillButton({
   onSaved: (pageId: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [skills, setSkills] = useState<Skill[] | null>(null);
+  const [skills, setSkills] = useState<FolderBackedSkill[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const ref = useRef<HTMLDivElement>(null);
@@ -396,11 +425,13 @@ function SaveToSkillButton({
   useEffect(() => {
     if (!open || skills !== null) return;
     listSkills()
-      .then(setSkills)
+      // Saving a session writes a page into the skill's folder, which a
+      // source-backed skill has not got — its content lives in its source.
+      .then((all) => setSkills(all.filter((s) => s.backing === "folder")))
       .catch(() => setSkills([]));
   }, [open, skills]);
 
-  async function save(skill: Skill) {
+  async function save(skill: FolderBackedSkill) {
     setBusy(true);
     setMessage("");
     try {

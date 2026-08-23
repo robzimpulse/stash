@@ -1,7 +1,12 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
+import SiteFooter from "../../_components/SiteFooter";
+import SiteHeader from "../../_components/SiteHeader";
+import { POSTS, blogPostingJsonLd } from "../_lib/posts";
+
 export const metadata: Metadata = {
+  alternates: { canonical: "/blog/open-questions-in-memory" },
   title: "Open Questions in Memory, and Our Predictions · Stash",
   description:
     "The questions we argue about most with others building AI memory — labs vs startups, weight vs token space, retrieval vs blast radius, benchmarks, context windows — and where we think each one lands.",
@@ -10,19 +15,28 @@ export const metadata: Metadata = {
 const X_POST = "https://x.com/samzliu/status/2075737137341940098";
 
 export default function OpenQuestionsInMemoryPage() {
+  const post = POSTS["open-questions-in-memory"];
+
   return (
     <main className="min-h-screen bg-background text-foreground">
-      <Header />
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(blogPostingJsonLd(post)) }}
+      />
+      <SiteHeader current="Blog" />
 
       <article className="mx-auto max-w-[720px] px-7 pb-24 pt-16">
         <p className="flex items-center font-mono text-[11px] font-medium uppercase tracking-[0.14em] text-muted">
           <span className="mr-[10px] inline-block h-[6px] w-[6px] rounded-full bg-brand" />
           Blog
         </p>
-        <h1 className="mt-5 text-balance font-display text-[clamp(32px,4.4vw,52px)] font-black leading-[1.04] tracking-[-0.035em] text-ink">
+        <h1 className="mt-5 text-balance font-display text-[clamp(32px,4.4vw,52px)] font-medium leading-[1.04] tracking-[-0.035em] text-ink">
           Open Questions in Memory, and Our Predictions
         </h1>
-        <p className="mt-5 text-[14px] text-muted">By Sam Liu</p>
+        <p className="mt-5 text-[14px] text-muted">
+          By {post.author.name} ·{" "}
+          <time dateTime={post.datePublished}>{post.byline}</time>
+        </p>
         <p className="mt-2 text-[14px] text-muted">
           Cross-posted from <Lnk href={X_POST}>X</Lnk>. We&rsquo;d love to hear
           your predictions and disagreements &mdash; reply there.
@@ -200,6 +214,9 @@ export default function OpenQuestionsInMemoryPage() {
           </Link>
         </div>
       </article>
+
+
+      <SiteFooter />
     </main>
   );
 }
@@ -217,37 +234,3 @@ function Lnk({ href, children }: { href: string; children: React.ReactNode }) {
   );
 }
 
-function Header() {
-  return (
-    <header className="sticky top-0 z-30 border-b border-border-subtle bg-background/85 backdrop-blur">
-      <div className="mx-auto flex h-16 max-w-[1200px] items-center justify-between px-7">
-        <Link
-          href="/"
-          className="font-display text-[20px] font-black tracking-[-0.03em] text-ink"
-        >
-          stash
-        </Link>
-        <nav className="flex items-center gap-5 text-[14px] text-dim">
-          <Link href="/discover" className="transition hover:text-ink">
-            Discover
-          </Link>
-          <Link href="/docs" className="transition hover:text-ink">
-            Docs
-          </Link>
-          <Link href="/blog" className="text-ink">
-            Blog
-          </Link>
-          <Link href="/contact-sales" className="transition hover:text-ink">
-            Contact sales
-          </Link>
-          <Link
-            href="/login"
-            className="hidden h-10 items-center rounded-lg border border-border bg-background px-[18px] text-[14px] font-medium text-ink transition hover:border-ink sm:inline-flex"
-          >
-            Sign in
-          </Link>
-        </nav>
-      </div>
-    </header>
-  );
-}

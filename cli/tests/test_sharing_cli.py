@@ -16,6 +16,12 @@ class _FakeClient:
     def __exit__(self, *_args):
         return None
 
+    # Session handles resolve server-side; no titled sessions here, so every
+    # handle passes through as the id it already is.
+    def resolve_session(self, ref, trashed=False):
+        self._calls.append(("resolve", ref, trashed))
+        return {"matched": False, "session_id": ref, "id": ref, "name": None}
+
     # object sharing
     def share_object(self, object_type, object_id, email, permission="read", expires_at=None):
         self._calls.append(("share", object_type, object_id, email, permission))
@@ -52,19 +58,6 @@ class _FakeClient:
         self._calls.append(("snapshot", skill_id, source_id, path))
         return {"id": "page-1"}
 
-    # session folders
-    def list_session_folders(self):
-        self._calls.append(("folders",))
-        return [{"name": "Launch", "id": "f1"}]
-
-    def create_session_folder(self, name):
-        self._calls.append(("new_folder", name))
-        return {"id": "f1", "name": name}
-
-    def assign_session_folder(self, session_row_id, folder_id=None):
-        self._calls.append(("assign", session_row_id, folder_id))
-        return {"ok": True}
-
 
 def _wire(monkeypatch) -> list:
     calls: list = []
@@ -85,13 +78,3 @@ def test_skill_snapshot_source(monkeypatch) -> None:
     calls = _wire(monkeypatch)
     main.skills_snapshot_source("cart-1", source="src-1", path="specs/auth.md", as_json=True)
     assert ("snapshot", "cart-1", "src-1", "specs/auth.md") in calls
-
-
-def test_session_folders(monkeypatch) -> None:
-    calls = _wire(monkeypatch)
-    main.hist_folders(as_json=True)
-    main.hist_new_folder("Launch", as_json=True)
-    main.mv_cmd(["session:sess-1"], to_folder="f1", to_root=False)
-    assert ("folders",) in calls
-    assert ("new_folder", "Launch") in calls
-    assert ("assign", "sess-1", "f1") in calls

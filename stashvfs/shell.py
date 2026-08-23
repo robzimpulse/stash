@@ -102,7 +102,74 @@ class SkillAppVfsShell:
     def _warn(self, message: str) -> None:
         self._warnings.append(f"{message}\n")
 
+    def _expand_globs(self, args: list[str]) -> list[str]:
+        """Expand `*`, `?` and `[...]` in path arguments, as a shell does.
+
+        This reads as a shell, so people write shell — `cat /memory/*` is the
+        idiom our own setup docs hand to developers. Without expansion that
+        resolved to a literal filename, found nothing, and returned empty:
+        an agent built on it ran with no context at all and nothing said so.
+
+        Every segment expands, not just the last, so `/sessions/*/transcript.md`
+        works. A pattern that matches nothing is left as-is, so the command
+        reports the missing path rather than silently reading less than asked.
+        """
+        expanded: list[str] = []
+        previous = ""
+        for arg in args:
+            # An option's value is a pattern for the command, not a path for
+            # the shell: `find -name '*.md'` must reach find verbatim. shlex
+            # already stripped the quotes, so "follows a flag" is the only
+            # signal left that an argument was a value, not a path.
+            if (
+                arg.startswith("-")
+                or previous.startswith("-")
+                or not any(ch in arg for ch in "*?[")
+            ):
+                expanded.append(arg)
+                previous = arg
+                continue
+            hits = self._glob(self._resolve_path(arg))
+            expanded.extend(hits or [arg])
+            previous = arg
+        return expanded
+
+    def _glob(self, path: str) -> list[str]:
+        """Every existing path matching this pattern, walking it a segment at a
+        time so a wildcard in the middle expands like one at the end."""
+        segments = [segment for segment in path.split("/") if segment]
+        matches = ["/"]
+        for segment in segments:
+            if not any(ch in segment for ch in "*?["):
+                matches = [
+                    candidate
+                    for base in matches
+                    if (candidate := posixpath.join(base, segment)) and self._exists(candidate)
+                ]
+                continue
+            widened: list[str] = []
+            for base in matches:
+                try:
+                    names = sorted(self.model.list_dir(base))
+                except (FileNotFoundError, NotADirectoryError, MountError):
+                    continue
+                widened.extend(
+                    posixpath.join(base, name)
+                    for name in names
+                    if fnmatch.fnmatchcase(name, segment)
+                )
+            matches = widened
+        return matches
+
+    def _exists(self, path: str) -> bool:
+        try:
+            self.model._get_node(path)
+        except (FileNotFoundError, NotADirectoryError, MountError):
+            return False
+        return True
+
     def _dispatch(self, name: str, args: list[str], stdin: str | None) -> str:
+        args = self._expand_globs(args)
         if name == "pwd":
             return f"{self.cwd}\n"
         if name == "cd":
@@ -491,6 +558,7 @@ class SkillAppVfsShell:
             sweep.append(file_paths)
             total_files += len(file_paths)
         docs_scanned = 0
+        scanned: list[str] = []
         budget_hit = False
         # The per-document reads below are the mechanics of one search, not
         # documents the user asked to see — scan_calls tags them so analytics
@@ -500,10 +568,10 @@ class SkillAppVfsShell:
             for file_paths in sweep:
                 if budget_hit:
                     break
-                self.model.prefetch(file_paths)
+                self.model.prefetch(file_paths, for_scan=True)
                 for file_path in file_paths:
                     try:
-                        text = self._read_text(file_path)
+                        text = self._read_for_scan(file_path)
                     except VfsScanBudget:
                         # Out of reads mid-sweep: report what was found rather
                         # than aborting, but never silently — the warning below
@@ -515,6 +583,7 @@ class SkillAppVfsShell:
                         self._warn(f"{name}: {file_path}: {e.detail}")
                         continue
                     docs_scanned += 1
+                    scanned.append(file_path)
                     matches.append(
                         _grep_text(
                             regex,
@@ -527,6 +596,17 @@ class SkillAppVfsShell:
                         )
                     )
         self.model.client.record_search(pattern, roots, docs_scanned)
+        for file_path in scanned:
+            shortfall = self.model.truncated_transcript(file_path)
+            if not shortfall:
+                continue
+            rendered, total = shortfall
+            self._warn(
+                f"{name}: '{file_path}' was searched in FULL ({total:,} events), but the "
+                f"file as rendered holds only the FIRST {rendered:,}. Matches past event "
+                f"{rendered:,} are NOT in the file, and its line numbers will not find "
+                "them. Complete session: the transcript.jsonl beside it."
+            )
         if budget_hit:
             self._warn(
                 f"{name}: stopped after reading {docs_scanned} of {total_files} files "
@@ -825,6 +905,11 @@ class SkillAppVfsShell:
 
     def _read_text(self, path: str) -> str:
         return self.model.read_file(path).decode("utf-8", errors="replace")
+
+    def _read_for_scan(self, path: str) -> str:
+        """What grep searches. Usually identical to `_read_text`; a transcript
+        is searched whole even though it renders a bounded slice."""
+        return self.model.read_for_scan(path).decode("utf-8", errors="replace")
 
     def _walk(self, root: str) -> list[str]:
         self.model._get_node(root)

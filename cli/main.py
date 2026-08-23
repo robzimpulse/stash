@@ -44,7 +44,6 @@ from .config import (
     stop_streaming,
     stored_base_url,
     streaming_stopped,
-    write_manifest,
 )
 from .formatting import console, output_json, print_user
 
@@ -82,21 +81,23 @@ def root(
 @app.command()
 def upgrade() -> None:
     """Upgrade the stash CLI to the latest version on PyPI."""
-    import shutil
     import subprocess
 
-    if not shutil.which("uv"):
+    from stashai import release
+
+    if release.is_editable():
+        typer.echo("This is an editable checkout — `git pull` to update it.", err=True)
+        raise typer.Exit(1)
+    command = release.upgrade_command()
+    if command is None:
         typer.echo(
-            "uv is not on PATH. Re-run the installer: "
-            'bash -c "$(curl -fsSL https://joinstash.ai/install)"',
+            "This install has no working upgrader (no uv, no pip). "
+            f"Re-run the installer: {release.INSTALLER}",
             err=True,
         )
         raise typer.Exit(1)
     typer.echo(f"Upgrading stashai from {__version__}…")
-    result = subprocess.run(
-        ["uv", "tool", "install", "--force", "--reinstall", "--refresh", "stashai"]
-    )
-    raise typer.Exit(result.returncode)
+    raise typer.Exit(subprocess.run(command).returncode)
 
 
 def _client(auto: bool = False) -> StashClient:
@@ -1122,6 +1123,37 @@ def _current_session_id() -> str | None:
     return None
 
 
+def _resolve_session(handle: str, field: str = "session_id") -> str:
+    """Session titles are aliases for session ids across the CLI.
+
+    A handle matching a session title — the stored spelling, the VFS
+    safe_name spelling that `stash search` prints, or the `/sessions/<name>`
+    directory name that `stash vfs ls` prints — resolves to that session's
+    `field`: "session_id" (the transcript stream id) or "id" (the row id
+    `rm`/`restore`/`mv`/`shares` take). Anything else is already an id and
+    passes through untouched; the server rejects unknown ids loudly.
+
+    The matching itself is server-side, so the CLI, the MCP tools, and the VFS
+    cannot disagree about what a name means."""
+    return _resolved_session_field(handle, field, trashed=False)
+
+
+def _resolve_trashed_session(handle: str) -> str:
+    """The row id of a trashed session named by title, for `stash restore`.
+
+    A trashed session is gone from the scope listing, so its title resolves
+    against the trash — the same set `stash trash list` prints."""
+    return _resolved_session_field(handle, "id", trashed=True)
+
+
+def _resolved_session_field(handle: str, field: str, *, trashed: bool) -> str:
+    with _client() as c:
+        try:
+            return c.resolve_session(handle, trashed=trashed)[field]
+        except StashError as e:
+            _err(e)
+
+
 def _extract_session_bookends(raw_jsonl: str) -> tuple[str, str, str]:
     """Extract (title, first_user_prompt, last_assistant_message) from a transcript.
 
@@ -1179,7 +1211,7 @@ def _extract_session_bookends(raw_jsonl: str) -> tuple[str, str, str]:
 def share_session(
     title: str = typer.Option("", "--title", "-t", help="Title for the shared Skill."),
     session_id: str = typer.Option(
-        "", "--session", "-s", help="Session ID. Auto-detected if omitted."
+        "", "--session", "-s", help="Session ID or title. Auto-detected if omitted."
     ),
     files: list[str] = typer.Option([], "--file", "-f", help="Files to attach (repeatable)."),
 ):
@@ -1192,9 +1224,11 @@ def share_session(
     telemetry.record("share")
 
     # Resolve session ID
-    sid = session_id or _current_session_id()
+    sid = _resolve_session(session_id) if session_id else _current_session_id()
     if not sid:
-        console.print("[red]Could not detect session. Pass --session <id> explicitly.[/red]")
+        console.print(
+            "[red]Could not detect session. Pass --session <id or title> explicitly.[/red]"
+        )
         raise typer.Exit(1)
 
     # Find and read the JSONL transcript
@@ -2730,80 +2764,6 @@ def hist_agents(as_json: bool = typer.Option(False, "--json")):
                 console.print(f"  {name}")
 
 
-@hist_app.command("folders")
-def hist_folders(as_json: bool = typer.Option(False, "--json")):
-    """List session folders (shareable groupings of sessions)."""
-    with _client() as c:
-        try:
-            data = c.list_session_folders()
-        except StashError as e:
-            _err(e)
-    if _use_json(as_json):
-        output_json(data)
-        return
-    if not data:
-        console.print("[dim]No session folders.[/dim]")
-        return
-    for f in data:
-        console.print(f"  [bold]{f.get('name')}[/bold]  [dim]({f.get('id')})[/dim]")
-
-
-@hist_app.command("new-folder")
-def hist_new_folder(
-    name: str = typer.Argument(...),
-    as_json: bool = typer.Option(False, "--json"),
-):
-    """Create a session folder."""
-    with _client() as c:
-        try:
-            data = c.create_session_folder(name)
-        except StashError as e:
-            _err(e)
-    if _use_json(as_json):
-        output_json(data)
-        return
-    console.print(f"[green]Created folder[/green] {name}  [dim]({data.get('id')})[/dim]")
-
-
-@hist_app.command("use-folder")
-def hist_use_folder(
-    folder: str = typer.Argument(
-        None, help="Folder name or id to pin this repo's sessions to. A new name is created."
-    ),
-    use_default: bool = typer.Option(
-        False, "--default", help="Clear the pin so sessions land in the Default folder."
-    ),
-):
-    """Pin this repo's agent sessions to a session folder (writes `.stash`)."""
-    if load_manifest() is None:
-        console.print(f"[red]No {MANIFEST_FILE} here. Run [bold]stash connect[/bold] first.[/red]")
-        raise typer.Exit(1)
-    if not folder and not use_default:
-        console.print("[red]Pass a folder name/id, or --default to clear the pin.[/red]")
-        raise typer.Exit(1)
-
-    if use_default:
-        write_manifest({"session_folder_id": ""})
-        console.print("[green]✓[/green] Sessions will land in the Default folder.")
-        return
-
-    with _client() as c:
-        try:
-            folders = c.list_session_folders()
-            match = next((f for f in folders if folder in (f.get("id"), f.get("name"))), None)
-            if match is None:
-                match = c.create_session_folder(folder)
-                console.print(f"[green]Created folder[/green] {folder}")
-        except StashError as e:
-            _err(e)
-
-    write_manifest({"session_folder_id": match["id"]})
-    console.print(
-        f"[green]✓[/green] Sessions in this repo now land in "
-        f"[bold]{match.get('name')}[/bold]  [dim]({match['id']})[/dim]"
-    )
-
-
 @hist_app.command("push")
 def hist_push(
     content: str = typer.Argument(...),
@@ -3071,7 +3031,9 @@ def agent_list(as_json: bool = typer.Option(False, "--json")):
 @agent_app.command("chat")
 def agent_chat(
     message: str = typer.Argument(..., help="The message to send."),
-    session: str = typer.Option(None, "--session", "-s", help="Continue an existing chat session."),
+    session: str = typer.Option(
+        None, "--session", "-s", help="Continue an existing chat session (id or title)."
+    ),
     agent: str = typer.Option(
         None, "--agent", "-a", help="Agent name or id. Default agent if omitted."
     ),
@@ -3079,6 +3041,7 @@ def agent_chat(
     """Start (or continue) a cloud agent chat and stream the turn live.
 
     Ctrl-C disconnects the stream, which stops the turn on the box."""
+    session = _resolve_session(session) if session else None
     with _client() as c:
         try:
             agent_id = _resolve_agent_id(c, agent) if agent else None
@@ -3109,10 +3072,11 @@ def agent_run(
 
 @agent_app.command("status")
 def agent_status(
-    session_id: str = typer.Argument(..., help="The chat session to check."),
+    session_id: str = typer.Argument(..., help="The chat session (id or title) to check."),
     as_json: bool = typer.Option(False, "--json"),
 ):
     """Whether a turn is currently running in a chat session."""
+    session_id = _resolve_session(session_id)
     with _client() as c:
         try:
             data = c.agent_turn_status(session_id)
@@ -3127,11 +3091,12 @@ def agent_status(
 
 @agent_app.command("watch")
 def agent_watch(
-    session_id: str = typer.Argument(..., help="The chat session to follow."),
+    session_id: str = typer.Argument(..., help="The chat session (id or title) to follow."),
     poll_seconds: float = typer.Option(2.0, "--poll", help="Poll interval in seconds."),
 ):
     """Follow a chat session live — works for turns started anywhere
     (web, Slack, a schedule, or another terminal). Exits when the turn ends."""
+    session_id = _resolve_session(session_id)
     role_style = {"user": "[bold]you:[/bold] ", "assistant": "", "tool": "[dim]", "": ""}
     with _client() as c:
         seen = 0
@@ -3156,9 +3121,12 @@ def agent_watch(
 
 @agent_app.command("stop")
 def agent_stop(
-    session_id: str = typer.Argument(..., help="The chat session whose turn to stop."),
+    session_id: str = typer.Argument(
+        ..., help="The chat session (id or title) whose turn to stop."
+    ),
 ):
     """Stop the turn running in a chat session (kills the run on the box)."""
+    session_id = _resolve_session(session_id)
     with _client() as c:
         try:
             c.stop_agent_turn(session_id)
@@ -3725,9 +3693,31 @@ def _parse_refs(refs: list[str]) -> list[tuple[str, str]]:
     return parsed
 
 
+def _resolve_session_refs(
+    items: list[tuple[str, str]], *, trashed: bool = False
+) -> list[tuple[str, str]]:
+    """Session refs may carry a title instead of an id — resolve each to the
+    session row id the rm/restore/mv endpoints take.
+
+    `trashed` picks which listing the title is matched against: `restore`
+    names sessions the overview has already dropped."""
+    resolved = []
+    for object_type, ref in items:
+        if object_type != "session":
+            resolved.append((object_type, ref))
+        elif trashed:
+            resolved.append((object_type, _resolve_trashed_session(ref)))
+        else:
+            resolved.append((object_type, _resolve_session(ref, field="id")))
+    return resolved
+
+
 @app.command("rm")
 def rm_cmd(
-    refs: list[str] = typer.Argument(..., help="Items as type:id. Types: page | file | session"),
+    refs: list[str] = typer.Argument(
+        ...,
+        help="Items as type:id (session refs also accept a title). Types: page | file | session",
+    ),
     permanent: bool = typer.Option(
         False, "--permanent", help="Skip the trash window — delete immediately."
     ),
@@ -3741,7 +3731,7 @@ def rm_cmd(
         "file": (lambda c, i: c.delete_file(i), lambda c, i: c.purge_file(i)),
         "session": (lambda c, i: c.delete_session(i), lambda c, i: c.purge_session(i)),
     }
-    items = _parse_refs(refs)
+    items = _resolve_session_refs(_parse_refs(refs))
     with _client() as c:
         for object_type, object_id in items:
             if object_type not in trash:
@@ -3762,18 +3752,22 @@ def rm_cmd(
 
 @app.command("restore")
 def restore_cmd(
-    refs: list[str] = typer.Argument(..., help="Items as type:id. Types: page | file | session"),
+    refs: list[str] = typer.Argument(
+        ...,
+        help="Items as type:id (session refs also accept a title). Types: page | file | session",
+    ),
 ):
     """Restore pages, files, or sessions from trash.
 
-    Example: stash restore page:<id> session:<id>
+    A session may be named by its title, as `stash trash list` prints it:
+    stash restore page:<id> session:"<title>"
     """
     restore = {
         "page": lambda c, i: c.restore_page(i),
         "file": lambda c, i: c.restore_file(i),
         "session": lambda c, i: c.restore_session(i),
     }
-    items = _parse_refs(refs)
+    items = _resolve_session_refs(_parse_refs(refs), trashed=True)
     with _client() as c:
         for object_type, object_id in items:
             if object_type not in restore:
@@ -3790,7 +3784,10 @@ def restore_cmd(
 
 @app.command("mv")
 def mv_cmd(
-    refs: list[str] = typer.Argument(..., help=f"Items as type:id. Types: {_OBJECT_TYPES}"),
+    refs: list[str] = typer.Argument(
+        ...,
+        help=f"Items as type:id (session refs also accept a title). Types: {_OBJECT_TYPES}",
+    ),
     to_folder: str = typer.Option(None, "--to-folder", help="Target folder id."),
     to_root: bool = typer.Option(False, "--to-root", help="Move to the root."),
 ):
@@ -3801,15 +3798,13 @@ def mv_cmd(
     if not to_folder and not to_root:
         console.print("[red]Pass --to-folder <id> or --to-root.[/red]")
         raise typer.Exit(1)
+    # Sessions can't be moved — session folders were removed with the
+    # developer platform work; sessions live in the flat sessions surface.
     items = _parse_refs(refs)
-    sessions = [i for t, i in items if t == "session"]
-    others = [{"object_type": t, "object_id": i} for t, i in items if t != "session"]
+    moves = [{"object_type": t, "object_id": i} for t, i in items]
     with _client() as c:
         try:
-            if others:
-                c.batch_move(others, target_folder_id=to_folder, move_to_root=to_root)
-            for session_id in sessions:
-                c.assign_session_folder(session_id, folder_id=None if to_root else to_folder)
+            c.batch_move(moves, target_folder_id=to_folder, move_to_root=to_root)
         except StashError as e:
             _err(e)
     console.print(f"[green]{len(items)} item(s) moved.[/green]")
@@ -3848,7 +3843,7 @@ def cp_cmd(
 shares_app = typer.Typer(help="Shares — grant people access to an object by email.")
 app.add_typer(shares_app, name="shares")
 
-_SHARE_OBJECT_TYPES = "folder | page | file | session | session_folder | table | source"
+_SHARE_OBJECT_TYPES = "folder | page | file | session | table | source"
 
 
 @shares_app.command("ls")
@@ -3886,6 +3881,8 @@ def shares_add(
     as_json: bool = typer.Option(False, "--json"),
 ):
     """Share an object with a person by email."""
+    if object_type == "session":
+        object_id = _resolve_session(object_id, field="id")
     with _client() as c:
         try:
             data = c.share_object(
@@ -3910,6 +3907,8 @@ def shares_rm(
     principal_type: str = typer.Option("user", "--principal-type"),
 ):
     """Revoke a person's access to an object."""
+    if object_type == "session":
+        object_id = _resolve_session(object_id, field="id")
     with _client() as c:
         try:
             c.unshare_object(object_type, object_id, principal_type, principal_id)
@@ -4624,7 +4623,7 @@ clutter Discover and defeat the model. Pick the right tool:
 - Share a single file or a folder/project → `stash upload <path> --json`, hand over `app_url` (no Skill).
 - Publishing a curated bundle → `stash upload <path> --skill "<title>" --json`.
 - Creating a fresh skill → `stash skills create "<name>" --public --json`.
-- Share a coding session → `stash share <session_id>`.
+- Share a coding session → `stash share` (this one), or `stash share --session "<title>"` for another.
 
 Run `stash prompts agent-guidance` to reprint this rule mid-session.
 
@@ -6276,8 +6275,9 @@ Commands to reach for
   folder (with a SKILL.md template) and publish it. Add content with the
   normal files/pages commands; `stash skills publish <folder_id>` shares
   an existing skill folder.
-- `stash share <session_id>` — freeze a coding session (transcript + the
-  files it touched) into a Skill folder. Sessions are inherently a
+- `stash share` — freeze this coding session (transcript + the files it
+  touched) into a Skill folder; `--session "<title>"` picks another one
+  by the title search and the VFS show. Sessions are inherently a
   collection, so this is the right unit.
 - `stash skills install <slug>` — install a public Skill (e.g. from
   Discover) into ~/.claude/skills so the local agent loads it next

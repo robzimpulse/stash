@@ -15,7 +15,7 @@ just to have the client parse it back — the rows are the source of truth.
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile
 from fastapi.responses import PlainTextResponse
 
 from ..auth import get_current_user, get_scope
@@ -23,11 +23,11 @@ from ..database import get_pool
 from ..services import (
     memory_service,
     security_audit_service,
-    session_folder_service,
     session_service,
     transcript_import,
     user_scope_service,
 )
+from ..tasks.agent_schedules import first_day_curator_tick
 
 router = APIRouter(prefix="/api/v1/me/transcripts", tags=["transcripts"])
 
@@ -52,6 +52,7 @@ async def upload_transcript(
     session_id: str = Form(...),
     agent_name: str = Form(...),
     cwd: str | None = Form(None),
+    # LEGACY filing lane for installed clients: honored when sent.
     session_folder_id: UUID | None = Form(None),
     replace: bool = Form(False),
     current_user: dict = Depends(get_current_user),
@@ -70,13 +71,6 @@ async def upload_transcript(
         raise HTTPException(status_code=400, detail="Session uploads must be .JSONL files")
     if not session_id.strip():
         raise HTTPException(status_code=400, detail="session_id is required")
-    if session_folder_id is not None and not await session_folder_service.can_add_session_to_folder(
-        owner_user_id=owner_user_id,
-        user_id=current_user["id"],
-        folder_id=session_folder_id,
-    ):
-        raise HTTPException(status_code=404, detail="Session folder not found")
-
     body = await file.read()
     if len(body) > MAX_TRANSCRIPT_SIZE:
         raise HTTPException(status_code=413, detail="Transcript too large (max 50 MB)")
@@ -160,6 +154,8 @@ async def upload_transcript(
             e["metadata"] = {**(e.get("metadata") or {}), "cwd": cwd}
 
     inserted = await memory_service.push_events_batch(owner_user_id, current_user["id"], events)
+    if inserted:
+        first_day_curator_tick.delay(str(owner_user_id))
     return {
         "session_id": session_id,
         "imported": len(inserted),
@@ -215,7 +211,9 @@ async def _resolve_readable_events(
     return None
 
 
-@router.get("/{session_id}")
+# session_id rides in the query, never the path: it is the developer's own
+# string and may contain anything, slashes included.
+@router.get("")
 async def get_transcript_metadata(
     session_id: str,
     current_user: dict = Depends(get_current_user),
@@ -247,17 +245,24 @@ async def get_transcript_metadata(
     }
 
 
-@router.get("/{session_id}/events")
+@router.get("/events")
 async def get_transcript_events(
     session_id: str,
-    limit: int = 100,
+    limit: int = Query(..., ge=1),
     offset: int = 0,
     current_user: dict = Depends(get_current_user),
 ):
     """One page of chat-thread turns for a session, oldest first, sourced
-    directly from history_events. The viewer loads the first page on open and
-    fetches more as the reader scrolls. offset is a turn ordinal, so a future
+    directly from history_events. offset is a turn ordinal, so a future
     in-session search can jump straight to a match's window.
+
+    limit is required and has no server-side default. A default here is
+    invisible to the caller, and the callers that read this route as a file
+    (the VFS renders sessions/<name>/transcript.md from it) cannot tell a
+    short session from a truncated one — which is exactly how every long
+    transcript came to be served silently cut off. Requiring the count moves
+    that decision to the caller, who is the only one who can disclose it:
+    `total` and `has_more` come back on every response so it can.
 
     No ownership gate: can_read_session is enforced per scope below, so
     another user the session is shared with can read it."""
@@ -283,7 +288,7 @@ async def get_transcript_events(
     raise HTTPException(status_code=404, detail="Transcript not found")
 
 
-@router.get("/{session_id}/export.jsonl")
+@router.get("/export.jsonl")
 async def export_transcript_jsonl(
     session_id: str,
     current_user: dict = Depends(get_current_user),
@@ -323,3 +328,38 @@ async def export_transcript_jsonl(
         media_type="application/jsonl",
         headers={"Content-Disposition": f'attachment; filename="session-{session_id}.jsonl"'},
     )
+
+
+# --- LEGACY path shapes -----------------------------------------------------
+# The canonical routes take session_id as a query parameter (the id is the
+# developer's own string, slashes included). These aliases keep every
+# installed client working — released CLIs and customer backends (Heavi's
+# audit trail shows ~1.7k transcript reads/month over API keys) read by the
+# old /{session_id} shapes. Registered last so the static routes above win.
+# They die with the legacy cutover, alongside session folders.
+
+
+@router.get("/{session_id}")
+async def get_transcript_metadata_legacy(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    return await get_transcript_metadata(session_id, current_user)
+
+
+@router.get("/{session_id}/events")
+async def get_transcript_events_legacy(
+    session_id: str,
+    limit: int = Query(..., ge=1),
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user),
+):
+    return await get_transcript_events(session_id, limit, offset, current_user)
+
+
+@router.get("/{session_id}/export.jsonl")
+async def export_transcript_jsonl_legacy(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    return await export_transcript_jsonl(session_id, current_user)

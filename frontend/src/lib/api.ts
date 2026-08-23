@@ -16,6 +16,7 @@ import {
   KnowledgeDensity,
   EmbeddingProjection,
   Workspace,
+  EndUser,
   MiniProgramApp,
   MiniProgramResolved,
   CuratedSkill,
@@ -206,6 +207,223 @@ export async function listMyWorkspaces(): Promise<Workspace[]> {
   return data.workspaces;
 }
 
+// --- Developer platform (External Multiplayer) ---
+
+// Creates a one-man invite-only workspace (no workspace_id) or activates the
+// platform on an existing workspace the caller belongs to.
+export async function activateDeveloperPlatform(workspaceId?: string): Promise<Workspace> {
+  return apiFetch<Workspace>(`${ME}/developer/activate`, {
+    method: "POST",
+    body: JSON.stringify(workspaceId ? { workspace_id: workspaceId } : {}),
+  });
+}
+
+// Mints a machine key on the developer workspace's scope user (scope header
+// picks the workspace). The key is shown once.
+export type DeveloperKey = {
+  id: string;
+  name: string;
+  access: "read" | "full";
+  created_at: string;
+  last_used_at: string | null;
+  /** First/last characters of the key, for recognition. Null on keys minted before fragments were stored. */
+  key_prefix: string | null;
+  key_suffix: string | null;
+  /** Null = never expires. An expired key is refused at auth time but still listed. */
+  expires_at: string | null;
+};
+
+// Names and usage only — key material is shown once, at mint time.
+export async function listDeveloperKeys(): Promise<{ keys: DeveloperKey[] }> {
+  return apiFetch(`${ME}/developer/keys`);
+}
+
+// Takes effect on the key's next request.
+export async function revokeDeveloperKey(id: string): Promise<{ revoked: boolean }> {
+  return apiFetch(`${ME}/developer/keys/${id}`, { method: "DELETE" });
+}
+
+export async function mintDeveloperKey(
+  name: string,
+  expiresInDays: number | null,
+  access: "read" | "full" = "read",
+): Promise<{ api_key: string; access: string; expires_at: string | null }> {
+  return apiFetch(`${ME}/developer/keys`, {
+    method: "POST",
+    body: JSON.stringify({ name, access, expires_in_days: expiresInDays }),
+  });
+}
+
+export async function listUsers(): Promise<{
+  workspace: Workspace;
+  users: EndUser[];
+  stats: { wiki_page_count: number; user_session_count: number };
+}> {
+  return apiFetch(`${ME}/users`);
+}
+
+// The whole workspace's sessions, newest first, labelled by user. Rows with
+// no user are the workspace's own agents — the curator's runs, mostly.
+export interface DeveloperSession {
+  session_id: string;
+  agent_name: string | null;
+  title: string | null;
+  event_count: number;
+  started_at: string | null;
+  last_event_at: string | null;
+  user_id: string | null;
+  user_name: string | null;
+  user_external_id: string | null;
+}
+
+export async function listDeveloperSessions(): Promise<{ sessions: DeveloperSession[] }> {
+  return apiFetch(`${ME}/developer/sessions`);
+}
+
+export interface DeveloperPageRow {
+  id: string;
+  name: string;
+  updated_at: string;
+}
+
+export interface DeveloperFileRow {
+  id: string;
+  name: string;
+  size_bytes: number;
+  created_at: string;
+}
+
+export interface DeveloperUserFiles {
+  id: string;
+  name: string;
+  external_id: string;
+  notepad_folder_id: string;
+  notepad_pages: DeveloperPageRow[];
+  files: DeveloperFileRow[];
+}
+
+export async function listDeveloperFiles(): Promise<{
+  wiki_folder_id: string;
+  wiki_pages: DeveloperPageRow[];
+  wiki_files: DeveloperFileRow[];
+  users: DeveloperUserFiles[];
+}> {
+  return apiFetch(`${ME}/developer/files`);
+}
+
+export interface EndUserSession {
+  session_id: string;
+  agent_name: string | null;
+  title: string | null;
+  event_count: number;
+  started_at: string | null;
+  last_event_at: string | null;
+}
+
+export interface EndUserFile {
+  id: string;
+  name: string;
+  content_type: string | null;
+  size_bytes: number;
+  created_at: string;
+}
+
+export interface EndUserWikiPage {
+  id: string;
+  name: string;
+  updated_at: string;
+}
+
+export interface CuratorRun {
+  session_id: string;
+  started_at: string;
+  status: "completed" | "failed" | "running" | "stopped" | "interrupted";
+  summary: string | null;
+  error: string | null;
+}
+
+export interface EndUserRef {
+  id: string;
+  name: string;
+  external_id: string;
+}
+
+export async function getCurator(): Promise<{
+  curator: {
+    name: string;
+    schedule_cron: string;
+    curated_through: string | null;
+    last_run_at: string | null;
+    last_run_outcome: string | null;
+    last_run_error: string | null;
+  };
+  next_run_at: string | null;
+  prompt: string;
+  backfill_prompt: string;
+  instructions: string | null;
+  feeding: EndUserRef[];
+  opted_out: EndUserRef[];
+  runs: CuratorRun[];
+}> {
+  return apiFetch(`${ME}/developer/curator`);
+}
+
+// Appended to the curator's prompt on every run; empty string clears it.
+export async function updateCuratorInstructions(
+  instructions: string,
+): Promise<{ instructions: string | null }> {
+  return apiFetch(`${ME}/developer/curator`, {
+    method: "PATCH",
+    body: JSON.stringify({ instructions }),
+  });
+}
+
+export async function runCuratorNow(): Promise<{ status: string }> {
+  return apiFetch(`${ME}/developer/curator/run`, { method: "POST" });
+}
+
+// Clears the delta watermark and runs over the full history.
+export async function backfillCurator(): Promise<{ status: string }> {
+  return apiFetch(`${ME}/developer/curator/backfill`, { method: "POST" });
+}
+
+export interface EndUserSource {
+  id: string;
+  provider: string;
+  type: string;
+  display_name: string;
+  sync_status: string | null;
+  last_synced_at: string | null;
+}
+
+export async function getUser(userId: string): Promise<{
+  user: EndUser;
+  sessions: EndUserSession[];
+  files: EndUserFile[];
+  notepad_pages: EndUserWikiPage[];
+  sources: EndUserSource[];
+}> {
+  return apiFetch(`${ME}/users/${userId}`);
+}
+
+export async function updateUser(
+  userId: string,
+  patch: { name?: string; share_wiki?: boolean },
+): Promise<EndUser> {
+  return apiFetch(`${ME}/users/${userId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+// A hackathon (or other) access code: grants the code's plan to this account.
+export async function redeemCode(code: string): Promise<{ plan: string }> {
+  return apiFetch("/api/v1/users/me/redeem-code", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
+}
+
 export async function updateMe(data: {
   display_name?: string;
   description?: string;
@@ -265,7 +483,7 @@ export async function searchUsers(query: string): Promise<UserSearchResult[]> {
 
 export interface BillingInfo {
   billing_enabled: boolean;
-  plan?: "free" | "pro";
+  plan?: "free" | "pro" | "enterprise";
   status?: string | null;
   connection_count?: number;
   connection_limit?: number;
@@ -305,6 +523,14 @@ export interface Source {
   last_synced_at?: string | null;
   search_hint?: string | null;
   settings?: Record<string, unknown> | null;
+  // True when documents inside this picked Drive folder can become Skills.
+  // `skills` and `documents` count the pair, so a
+  // document missing its frontmatter shows up as a gap rather than vanishing.
+  binds_skills?: boolean;
+  skills?: number;
+  documents?: number;
+  // Named so a shelf that is short of skills says which documents to go fix.
+  not_skills?: string[];
 }
 
 export interface SourceStatus extends Source {
@@ -322,6 +548,9 @@ export interface SourceEntry {
   // Archive state for save-type sources: 'done' | 'pending' | 'failed'.
   // Null/absent for sources without an archive pipeline.
   status?: string | null;
+  // Present for documents inside a Drive folder used for Skills.
+  skill_status?: "skill" | "draft" | "not_skill" | "checking";
+  skill_status_reason?: string;
 }
 
 const NATIVE_SOURCE_TYPES = new Set(["native_files", "native_sessions"]);
@@ -370,7 +599,7 @@ export async function addSource(body: {
   external_ref?: string;
   display_name?: string;
   settings?: Record<string, unknown>;
-}): Promise<{ id: string }> {
+}): Promise<{ id: string; display_name: string }> {
   return apiFetch(`${ME}/sources`, {
     method: "POST",
     body: JSON.stringify(body),
@@ -379,6 +608,17 @@ export async function addSource(body: {
 
 export async function syncSource(sourceId: string): Promise<{ task_id: string }> {
   return apiFetch(`${ME}/sources/${sourceId}/sync`, {
+    method: "POST",
+  });
+}
+
+// Treat a picked Drive folder as a shelf of skills, or stop. Only the binding
+// changes — the documents stay indexed either way.
+export async function setSourceBindsSkills(
+  sourceId: string,
+  bindsSkills: boolean
+): Promise<Source> {
+  return apiFetch(`${ME}/sources/${sourceId}/${bindsSkills ? "bind" : "unbind"}-skills`, {
     method: "POST",
   });
 }
@@ -556,6 +796,16 @@ export interface WikiGraph {
 // The Memory wiki as a graph: pages in the Memory subtree + links between them.
 export async function getMemoryGraph(): Promise<WikiGraph> {
   return apiFetch(`${ME}/memory-graph`);
+}
+
+// The same graph for a developer workspace's shared wiki.
+export async function getDeveloperWikiGraph(): Promise<WikiGraph> {
+  return apiFetch(`${ME}/developer/wiki-graph`);
+}
+
+// One end user's own wiki, same graph shape.
+export async function getUserWikiGraph(userId: string): Promise<WikiGraph> {
+  return apiFetch(`${ME}/users/${userId}/wiki-graph`);
 }
 
 // --- Curator log ---
@@ -1204,102 +1454,26 @@ export interface SessionSummary {
   owner_user_id: string | null;
   user_name: string;
   agent_name: string | null;
+  // LEGACY filing lane: folders are written by installed clients' API calls
+  // only (no UI creates them); shown read-only when present.
+  session_folder_name: string | null;
   event_count: number;
   started_at: string;
   last_event_at: string;
-  session_folder_id: string | null;
-  session_folder_name: string | null;
 }
 
 export type GeneralPermission = "none" | "read" | "comment" | "write";
 // Stored visibility is two-state. "shared" is a derived display state.
-export type SessionFolderVisibility = "private" | "public";
 export type DisplayVisibility = "private" | "shared" | "public";
 
 // The label to show: public link, else "shared" if anyone's been invited, else
-// private. Session folders feed (access, count) in.
+// private.
 export function displayVisibility(
   access: "private" | "public",
   shareCount: number,
 ): DisplayVisibility {
   if (access === "public") return "public";
   return shareCount > 0 ? "shared" : "private";
-}
-
-export interface SessionFolder {
-  id: string;
-  owner_user_id: string;
-  slug: string;
-  name: string;
-  owner_display_name: string | null;
-  access: SessionFolderVisibility;
-  public_permission: GeneralPermission;
-  discoverable: boolean;
-  is_default: boolean;
-  view_count: number;
-  session_count: number;
-  share_count: number;
-}
-
-export async function listSessionFolders(): Promise<SessionFolder[]> {
-  const data = await apiFetch<{ folders: SessionFolder[] }>(`${ME}/session-folders`);
-  return data.folders;
-}
-
-export async function createSessionFolder(name: string): Promise<SessionFolder> {
-  return apiFetch<SessionFolder>(`${ME}/session-folders`, {
-    method: "POST",
-    body: JSON.stringify({ name }),
-  });
-}
-
-export async function updateSessionFolder(
-  folderId: string,
-  data: {
-    name?: string;
-    public_permission?: GeneralPermission;
-    discoverable?: boolean;
-  },
-): Promise<SessionFolder> {
-  return apiFetch<SessionFolder>(
-    `${ME}/session-folders/${folderId}`,
-    { method: "PATCH", body: JSON.stringify(data) },
-  );
-}
-
-export async function deleteSessionFolder(folderId: string): Promise<void> {
-  await apiFetch(`${ME}/session-folders/${folderId}`, {
-    method: "DELETE",
-  });
-}
-
-// Move one or more sessions into a folder (or out, with folderId null).
-export async function assignSessionFolder(
-  sessionRowIds: string[],
-  folderId: string | null,
-): Promise<void> {
-  await apiFetch(`${ME}/session-folders/assign`, {
-    method: "POST",
-    body: JSON.stringify({ session_row_ids: sessionRowIds, folder_id: folderId }),
-  });
-}
-
-export interface PublicSessionFolder {
-  folder: SessionFolder;
-  sessions: {
-    id: string;
-    session_id: string;
-    agent_name: string;
-    cwd: string | null;
-    user_name: string | null;
-    event_count: number;
-    started_at: string | null;
-    last_event_at: string | null;
-  }[];
-}
-
-export async function getPublicSessionFolder(slug: string): Promise<PublicSessionFolder> {
-  return apiFetch<PublicSessionFolder>(`/api/v1/session-folders/${slug}`);
 }
 
 export interface LinearTicketLabel {
@@ -1320,14 +1494,12 @@ export interface LinearTicketLabel {
 
 export async function listMySessions(
   limit = 50,
-  sessionFolderId?: string,
   offset = 0,
   sessionIdPrefix?: string
 ): Promise<SessionSummary[]> {
   const qs = new URLSearchParams();
   qs.set("limit", String(limit));
   if (offset) qs.set("offset", String(offset));
-  if (sessionFolderId) qs.set("session_folder_id", sessionFolderId);
   if (sessionIdPrefix) qs.set("session_id_prefix", sessionIdPrefix);
   const data = await apiFetch<{ sessions: SessionSummary[] }>(
     `${ME}/sessions?${qs.toString()}`
@@ -1359,21 +1531,18 @@ export interface SessionDetail {
 }
 
 export async function getSessionDetail(sessionId: string): Promise<SessionDetail> {
-  return apiFetch(`/api/v1/sessions/${encodeURIComponent(sessionId)}`);
+  return apiFetch(`/api/v1/sessions/detail?session_id=${encodeURIComponent(sessionId)}`);
 }
 
 export async function renameSession(
   sessionId: string,
   title: string
 ): Promise<{ title: string }> {
-  return apiFetch(
-    `${ME}/sessions/${encodeURIComponent(sessionId)}/title`,
-    {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title }),
-    }
-  );
+  return apiFetch(`${ME}/sessions/title?session_id=${encodeURIComponent(sessionId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
 }
 
 export async function deleteSession(sessionRowId: string): Promise<void> {
@@ -1389,7 +1558,7 @@ export async function materializeSession(
   folderId: string
 ): Promise<Page> {
   return apiFetch(
-    `${ME}/sessions/${encodeURIComponent(sessionId)}/materialize`,
+    `${ME}/sessions/materialize?session_id=${encodeURIComponent(sessionId)}`,
     { method: "POST", body: JSON.stringify({ folder_id: folderId }) },
   );
 }
@@ -1448,9 +1617,7 @@ export interface SkillPublishInfo {
   view_count: number;
 }
 
-// A skill folder: SKILL.md frontmatter + folder stats + publish info.
-export interface Skill {
-  folder_id: string;
+interface SkillCommon {
   name: string;
   description: string;
   when_to_use: string;
@@ -1458,7 +1625,63 @@ export interface Skill {
   mcp_exposed: boolean;
   file_count: number;
   updated_at: string;
+  // False = a draft: named and declared, but with no instructions for an
+  // agent to load. Agents refuse to run one, so every surface must say so.
+  has_instructions: boolean;
   published: SkillPublishInfo | null;
+}
+
+// A skill: SKILL.md frontmatter + stats + publish info.
+//
+// `backing` says where it lives, and the two cases carry different ids so the
+// compiler refuses folder verbs on a source-backed skill. A folder-backed
+// skill is the editable kind. A source-backed one is a document in a connected
+// source bound as a skill shelf: it has no folder, and it is managed upstream
+// in Drive rather than here.
+export type Skill =
+  | (SkillCommon & {
+      backing: "folder";
+      folder_id: string;
+      source_ref: null;
+      source_id: null;
+      source_name: null;
+    })
+  | (SkillCommon & {
+      backing: "source";
+      folder_id: null;
+      source_ref: string;
+      // The connected source's row id — what syncSource takes.
+      source_id: string;
+      // The shelf it was read from — two shelves can hold skills with the
+      // same name, and the card is where you tell them apart.
+      source_name: string;
+    });
+
+// The editable kind, for the verbs that only apply to a real folder.
+export type FolderBackedSkill = Extract<Skill, { backing: "folder" }>;
+
+// One source-backed skill, read: its document IS the instructions.
+export interface SourceSkillRead {
+  source_ref: string;
+  // The connected source's row id — what syncSource takes.
+  source_id: string;
+  name: string;
+  description: string;
+  source_name: string;
+  has_instructions: boolean;
+  body: string;
+  files: { id: string; name: string; updated_at: string; content: string }[];
+}
+
+// Addressed by the upstream file id, so the link survives a rename in Drive.
+export async function readSourceSkill(sourceRef: string): Promise<SourceSkillRead> {
+  return apiFetch(`${ME}/source-skills/${encodeURIComponent(sourceRef)}`);
+}
+
+// A skill's identity across surfaces that only need to tell skills apart —
+// pins, selection, React keys.
+export function skillKey(skill: Skill): string {
+  return skill.backing === "folder" ? skill.folder_id : skill.source_ref;
 }
 
 export async function listSkills(): Promise<Skill[]> {
@@ -1773,8 +1996,10 @@ export interface SessionTranscript {
   download_url: string | null;
 }
 
+// session_id rides in the query, never the path — it is the developer's own
+// string and may contain anything, slashes included.
 export async function getTranscript(sessionId: string): Promise<SessionTranscript> {
-  return apiFetch(`${ME}/transcripts/${encodeURIComponent(sessionId)}`);
+  return apiFetch(`${ME}/transcripts?session_id=${encodeURIComponent(sessionId)}`);
 }
 
 export interface SessionEvent {
@@ -1797,11 +2022,9 @@ export async function getSessionEventsPage(
   limit = 100,
   offset = 0
 ): Promise<SessionEventsPage> {
-  const qs = new URLSearchParams({ limit: String(limit) });
+  const qs = new URLSearchParams({ session_id: sessionId, limit: String(limit) });
   if (offset) qs.set("offset", String(offset));
-  return apiFetch<SessionEventsPage>(
-    `${ME}/transcripts/${encodeURIComponent(sessionId)}/events?${qs}`
-  );
+  return apiFetch<SessionEventsPage>(`${ME}/transcripts/events?${qs}`);
 }
 
 // Drains every page. For consumers that search a whole session client-side;
@@ -1978,12 +2201,10 @@ export async function getFolderContents(folderId: string): Promise<FolderContent
 
 export type SharedObjectType =
   | "folder"
-  | "session_folder"
   | "page"
   | "file"
   | "table"
-  | "session"
-  | "source";
+  | "session";
 
 export interface SharedWithMeItem {
   object_type: SharedObjectType;
@@ -1998,17 +2219,6 @@ export interface SharedWithMeItem {
 export async function listSharedWithMe(): Promise<SharedWithMeItem[]> {
   const res = await apiFetch<{ items: SharedWithMeItem[] }>("/api/v1/share/with-me");
   return res.items;
-}
-
-// Sessions inside a folder shared with you, in SessionSummary shape so the
-// shared view renders the same chronological/filter browser as your own.
-export async function listSharedSessionFolderSessions(
-  folderId: string,
-): Promise<SessionSummary[]> {
-  const res = await apiFetch<{ sessions: SessionSummary[] }>(
-    `/api/v1/share/session-folders/${folderId}/sessions`
-  );
-  return res.sessions;
 }
 
 export interface ObjectShare {

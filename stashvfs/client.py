@@ -30,7 +30,7 @@ class VfsScanBudget(Exception):
 
     Raised by clients that meter reads (the server-side VFS) for reads issued
     inside `scan_calls`. The shell stops the grep sweep at this point and
-    reports the results so far with a loud truncation warning — an org-wide
+    reports the results so far with a loud truncation warning — a scope-wide
     sweep degrades to a partial answer instead of an aborted command.
     """
 
@@ -74,7 +74,14 @@ class VfsClient(Protocol):
 
     def get_skill_text(self, slug: str) -> str: ...
 
-    def get_transcript_events(self, session_id: str) -> list: ...
+    def get_source_skill_text(self, doc_id: str) -> str: ...
+
+    def get_transcript_events(self, session_id: str, limit: int, offset: int = 0) -> dict:
+        """One page of a session's events. Returns the whole envelope —
+        `events`, `total`, `has_more` — not just the list: a caller that
+        renders a bounded slice can only disclose what it left out if it is
+        told the total."""
+        ...
 
     def export_transcript_jsonl(self, session_id: str) -> str: ...
 

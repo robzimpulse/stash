@@ -1,18 +1,29 @@
 import type { MetadataRoute } from "next";
 
-const BASE = "https://joinstash.ai";
+const BASE = "https://www.joinstash.ai";
 
-// Public marketing routes. Keep in sync with the nav/footer so new use-case
-// pages get indexed as the site scales.
+// Public marketing routes. Keep in sync with the nav/footer so new pages get
+// indexed as the site scales.
 const ROUTES = [
   "",
-  "/company-brain",
-  "/memory",
-  "/drive",
-  "/bookmarks",
+  "/internal-agents",
+  "/external-agents",
+  "/pricing",
   "/discover",
+  "/security",
   "/docs",
+  "/docs/quickstart",
+  "/docs/concepts",
+  "/docs/cli",
+  "/docs/self-hosting",
+  "/docs/contributing",
   "/blog",
+  "/blog/how-to-build-a-company-brain",
+  "/blog/three-dimensions-agent-memory-store",
+  "/blog/open-questions-in-memory",
+  "/blog/why-no-great-consumer-ai",
+  "/blog/context-gold-rush",
+  "/blog/containerizing-memory",
   "/contact-sales",
   "/privacy",
   "/terms",

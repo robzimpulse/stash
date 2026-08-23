@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import ResourceShareButton from "./ResourceShareButton";
@@ -115,9 +116,8 @@ describe("ResourceShareButton", () => {
     fireEvent.change(screen.getByLabelText("Add people"), {
       target: { value: "ada@example.com" },
     });
-    fireEvent.change(screen.getByLabelText("Invite permission"), {
-      target: { value: "write" },
-    });
+    await userEvent.click(screen.getByLabelText("Invite permission"));
+    await userEvent.click(await screen.findByRole("option", { name: "Can edit" }));
     fireEvent.click(screen.getByRole("button", { name: "Invite" }));
 
     await waitFor(() =>
@@ -146,9 +146,8 @@ describe("ResourceShareButton", () => {
     fireEvent.click(screen.getByRole("button", { name: "Share" }));
     await screen.findByText("Ada Lovelace");
 
-    fireEvent.change(screen.getByLabelText("Change permission"), {
-      target: { value: "comment" },
-    });
+    await userEvent.click(screen.getByLabelText("Change permission"));
+    await userEvent.click(await screen.findByRole("option", { name: "Can comment" }));
 
     await waitFor(() =>
       expect(shareObjectByEmail).toHaveBeenCalledWith(
@@ -161,38 +160,4 @@ describe("ResourceShareButton", () => {
     expect(await screen.findByText("Access updated.")).toBeInTheDocument();
   });
 
-  it("shares a source read-only: no permission choices, invites at read", async () => {
-    // The backend rejects comment/write for sources, so the dialog must not
-    // offer a level to pick and must send read — otherwise the POST 400s.
-    render(
-      <ResourceShareButton
-        objectType="source"
-        objectId="src-1"
-        resourceName="Team Drive"
-        resourceUrlPath="/integrations/google?source=src-1"
-        currentUser={currentUser}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "Share" }));
-    await screen.findByRole("dialog", { name: "Share Team Drive" });
-    await screen.findByText("Ada Lovelace");
-
-    expect(screen.queryByLabelText("Invite permission")).toBeNull();
-    expect(screen.queryByLabelText("Change permission")).toBeNull();
-
-    fireEvent.change(screen.getByLabelText("Add people"), {
-      target: { value: "grace@example.com" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Invite" }));
-
-    await waitFor(() =>
-      expect(shareObjectByEmail).toHaveBeenCalledWith(
-        "source",
-        "src-1",
-        "grace@example.com",
-        "read",
-      ),
-    );
-  });
 });

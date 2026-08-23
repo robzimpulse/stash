@@ -12,6 +12,7 @@ from pathlib import Path
 
 import httpx
 
+from stashai import release
 from stashvfs import VfsClientError
 
 
@@ -101,6 +102,7 @@ class StashClient:
         headers = kwargs.pop("headers", {})
         headers.update(self._headers())
         resp = self._http.request(method, path, headers=headers, **kwargs)
+        release.note_latest(resp.headers.get(release.LATEST_VERSION_HEADER, ""))
         if not resp.is_success:
             detail = ""
             try:
@@ -253,6 +255,12 @@ class StashClient:
         resp = self._request("GET", f"/api/v1/skills/{slug}", params={"format": "text"})
         return resp.text
 
+    def get_source_skill_text(self, doc_id: str) -> str:
+        """A source-backed skill has no publish slug — it is addressed by the
+        document that backs it."""
+        resp = self._request("GET", f"/api/v1/me/source-skills/{doc_id}")
+        return resp.json().get("combined", "")
+
     def snapshot_source_into_skill(self, skill_id: str, source_id: str, path: str) -> dict:
         return self._post(
             f"/api/v1/me/skills/{skill_id}/snapshot-source",
@@ -310,20 +318,6 @@ class StashClient:
         )
 
     # --- Session folders (shareable grouping for sessions) ---
-
-    def list_session_folders(self) -> list:
-        return self._list("/api/v1/me/session-folders", "folders")
-
-    def create_session_folder(self, name: str) -> dict:
-        return self._post("/api/v1/me/session-folders", json={"name": name})
-
-    def assign_session_folder(self, session_row_id: str, folder_id: str | None = None) -> dict:
-        return self._post(
-            "/api/v1/me/session-folders/assign",
-            json={"session_row_id": session_row_id, "folder_id": folder_id},
-        )
-
-    # --- Aggregate ---
 
     def all_pages(self) -> list:
         return self._list("/api/v1/me/pages", "pages")
@@ -860,17 +854,29 @@ class StashClient:
 
     # --- Sessions ---
 
+    def resolve_session(self, ref: str, trashed: bool = False) -> dict:
+        """What session a handle names — a title, a VFS name, or an id.
+
+        `matched` is false when the handle names no title; `session_id` and
+        `id` then echo the handle, so callers need no branch.
+        """
+        return self._get("/api/v1/me/sessions/resolve", ref=ref, trashed=trashed)
+
     def delete_session(self, session_row_id: str) -> None:
         self._delete(f"/api/v1/me/sessions/{session_row_id}")
 
-    def get_transcript_events(self, session_id: str) -> list:
-        data = self._get(f"/api/v1/me/transcripts/{session_id}/events")
-        return data.get("events", []) if isinstance(data, dict) else data
+    def get_transcript_events(self, session_id: str, limit: int, offset: int = 0) -> dict:
+        # session_id is a query param, not a path segment — developers' ids may
+        # contain slashes.
+        return self._get(
+            "/api/v1/me/transcripts/events", session_id=session_id, limit=limit, offset=offset
+        )
 
     def export_transcript_jsonl(self, session_id: str) -> str:
         return self._request(
             "GET",
-            f"/api/v1/me/transcripts/{session_id}/export.jsonl",
+            "/api/v1/me/transcripts/export.jsonl",
+            params={"session_id": session_id},
         ).text
 
     def restore_session(self, session_row_id: str) -> None:

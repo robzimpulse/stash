@@ -1,7 +1,12 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
+import SiteFooter from "../../_components/SiteFooter";
+import SiteHeader from "../../_components/SiteHeader";
+import { POSTS, blogPostingJsonLd } from "../_lib/posts";
+
 export const metadata: Metadata = {
+  alternates: { canonical: "/blog/how-to-build-a-company-brain" },
   title:
     "Giving yourself superpowers: Advice on building a simple company brain · Stash",
   description:
@@ -9,19 +14,28 @@ export const metadata: Metadata = {
 };
 
 export default function HowToBuildACompanyBrainPage() {
+  const post = POSTS["how-to-build-a-company-brain"];
+
   return (
     <main className="min-h-screen bg-background text-foreground">
-      <Header />
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(blogPostingJsonLd(post)) }}
+      />
+      <SiteHeader current="Blog" />
 
       <article className="mx-auto max-w-[720px] px-7 pb-24 pt-16">
         <p className="flex items-center font-mono text-[11px] font-medium uppercase tracking-[0.14em] text-muted">
           <span className="mr-[10px] inline-block h-[6px] w-[6px] rounded-full bg-brand" />
           Blog
         </p>
-        <h1 className="mt-5 text-balance font-display text-[clamp(32px,4.4vw,52px)] font-black leading-[1.04] tracking-[-0.035em] text-ink">
+        <h1 className="mt-5 text-balance font-display text-[clamp(32px,4.4vw,52px)] font-medium leading-[1.04] tracking-[-0.035em] text-ink">
           Giving yourself superpowers: Advice on building a simple company brain
         </h1>
-        <p className="mt-5 text-[14px] text-muted">By Henry Dowling · June 2026</p>
+        <p className="mt-5 text-[14px] text-muted">
+          By {post.author.name} ·{" "}
+          <time dateTime={post.datePublished}>{post.byline}</time>
+        </p>
 
         <div className="prose prose-lg mt-10">
           <p>
@@ -113,7 +127,10 @@ export default function HowToBuildACompanyBrainPage() {
             rel="noopener noreferrer"
           >
             <img
-              src="/blog/dflieb-company-brain.png"
+              src="/blog/dflieb-company-brain.webp"
+              width={1080}
+              height={352}
+              loading="lazy"
               alt="Tweet from David Lieb (@dflieb): “It's so nice having our YC company brain have access to slack, so I can use my agent to….search slack.”"
               className="mx-auto w-full max-w-[540px] rounded-xl border border-border-subtle"
             />
@@ -160,7 +177,10 @@ export default function HowToBuildACompanyBrainPage() {
             unless you want your CISO to get mad at you.
           </p>
           <img
-            src="/blog/integrations-auth-table.png"
+            src="/blog/integrations-auth-table.webp"
+            width={1600}
+            height={408}
+            loading="lazy"
             alt="A central integrations table storing encrypted client_id, client_secret, bearer auth token, and refresh token per integration (Jira and Granola shown)."
             className="w-full rounded-xl border border-border-subtle"
           />
@@ -254,7 +274,10 @@ export default function HowToBuildACompanyBrainPage() {
             of such a document:
           </p>
           <img
-            src="/blog/gong-data-retention-report.png"
+            src="/blog/gong-data-retention-report.webp"
+            width={1120}
+            height={772}
+            loading="lazy"
             alt="An HTML report an agent produced from Gong sales-call data: “How often is data retention coming up in sales calls?” with summary stats and a weekly-mentions chart."
             className="w-full rounded-xl border border-border-subtle"
           />
@@ -284,7 +307,10 @@ export default function HowToBuildACompanyBrainPage() {
             of time they waste on coding tasks by nearly half!
           </p>
           <img
-            src="/blog/transcript-sharing-benchmark.png"
+            src="/blog/transcript-sharing-benchmark.webp"
+            width={1120}
+            height={567}
+            loading="lazy"
             alt="Bar chart, “Claude Code arrives at the fix faster with transcript sharing”: tool calls 272 → ~137, agent turns 123 → ~71, and wasted actions 192 → ~5 when transcripts are shared."
             className="mx-auto w-full max-w-[560px] rounded-xl border border-border-subtle"
           />
@@ -369,6 +395,9 @@ export default function HowToBuildACompanyBrainPage() {
           </Link>
         </div>
       </article>
+
+
+      <SiteFooter />
     </main>
   );
 }
@@ -403,37 +432,3 @@ function Lnk({
   );
 }
 
-function Header() {
-  return (
-    <header className="sticky top-0 z-30 border-b border-border-subtle bg-background/85 backdrop-blur">
-      <div className="mx-auto flex h-16 max-w-[1200px] items-center justify-between px-7">
-        <Link
-          href="/"
-          className="font-display text-[20px] font-black tracking-[-0.03em] text-ink"
-        >
-          stash
-        </Link>
-        <nav className="flex items-center gap-5 text-[14px] text-dim">
-          <Link href="/discover" className="transition hover:text-ink">
-            Discover
-          </Link>
-          <Link href="/docs" className="transition hover:text-ink">
-            Docs
-          </Link>
-          <Link href="/blog" className="text-ink">
-            Blog
-          </Link>
-          <Link href="/contact-sales" className="transition hover:text-ink">
-            Contact sales
-          </Link>
-          <Link
-            href="/login"
-            className="hidden h-10 items-center rounded-lg border border-border bg-background px-[18px] text-[14px] font-medium text-ink transition hover:border-ink sm:inline-flex"
-          >
-            Sign in
-          </Link>
-        </nav>
-      </div>
-    </header>
-  );
-}

@@ -3,10 +3,8 @@
 A *source* is anything the agent can read. Two are native — the **file system**
 and **session transcripts** — readable by the owner and anyone they're shared
 with. The rest are **connected sources** (GitHub / Drive / Gmail / Notion /
-Slack / Granola) — rows in `user_sources`, owned by the connecting user and
-read-shareable: a recipient reads the source's content through Stash using the
-OWNER's token (delegated), but never sees the token, and management/sync stay
-owner-only.
+Slack / Granola) — rows in `user_sources`, readable by the connecting user or
+members of the workspace that owns the connection.
 
 This module owns:
 - the `user_sources` registry (CRUD + sync bookkeeping),
@@ -21,7 +19,7 @@ This module also owns the unified VFS surface (`source_entries`, `source_documen
 `search_all`) over BOTH native and connected sources — the single codepath the
 agent tools and the REST endpoints both call. Native reads delegate to
 files_tree_service / memory_service (imported lazily to avoid an import cycle).
-Connected-source reads resolve through get_readable_source (owner or a share).
+Connected-source reads resolve through get_readable_source (owner or workspace member).
 """
 
 from __future__ import annotations
@@ -92,7 +90,10 @@ DEFAULT_SYNC_INTERVAL_S = {
     "github_repo": 3600,
     "gmail": 1800,
     "google_drive": 1800,
-    "google_drive_folder": 1800,
+    # Tighter than the rest: a folder bound as a skill shelf is edited in
+    # Drive and read back here, and a half-hour lag makes that loop feel
+    # broken. (Real freshness wants Drive push channels — future work.)
+    "google_drive_folder": 300,
     "notion": 1800,
     "slack": 21600,
     "granola": 21600,
@@ -275,6 +276,8 @@ def _source_row(row) -> dict:
         "sync_warning": row["sync_warning"],
         "last_synced_at": row["last_synced_at"].isoformat() if row["last_synced_at"] else None,
         "settings": row["settings"] or {},
+        "binds_skills": row["binds_skills"],
+        "end_user_id": str(row["end_user_id"]) if row["end_user_id"] else None,
     }
 
 
@@ -292,6 +295,7 @@ async def create_source(
     external_ref: str,
     display_name: str,
     settings: dict | None = None,
+    end_user_id: UUID | None = None,
 ) -> dict:
     """Register a connected source (idempotent on the natural key). For synced
     types the first sync runs immediately because `next_sync_at` defaults to
@@ -308,9 +312,9 @@ async def create_source(
         """
         INSERT INTO user_sources (
             owner_user_id, source_type, external_ref,
-            display_name, capability, sync_interval_s, sync_enabled, settings
+            display_name, capability, sync_interval_s, sync_enabled, settings, end_user_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
         ON CONFLICT (owner_user_id, source_type, external_ref)
         DO UPDATE SET
             display_name = EXCLUDED.display_name,
@@ -319,6 +323,9 @@ async def create_source(
             settings = coalesce(user_sources.settings, '{}'::jsonb) || EXCLUDED.settings,
             -- A disconnected-with-data source resumes syncing on reconnect.
             sync_enabled = EXCLUDED.sync_enabled,
+            -- The connect call's scoping wins: reconnecting for a different
+            -- end user (or none) must not keep the old row's scope.
+            end_user_id = EXCLUDED.end_user_id,
             updated_at = now()
         RETURNING *
         """,
@@ -330,6 +337,7 @@ async def create_source(
         interval,
         sync_enabled,
         normalized_settings,
+        end_user_id,
     )
     source = _source_row(row)
     await purge_disallowed_copied_documents(source)
@@ -377,23 +385,26 @@ async def purge_disallowed_copied_documents(source: dict) -> int:
     return 0
 
 
-async def list_connected_sources(user_id: UUID) -> list[dict]:
-    """Connected sources `user_id` can read: the ones they own, plus any shared
-    with them. Each row keeps its real owner_user_id, so reads of a shared source
-    delegate to the source owner's token."""
-    predicate = permission_service.readable_content_condition("source", "obj", 1)
+async def list_connected_sources(user_id: UUID, end_user_id: UUID | None = None) -> list[dict]:
+    """Connected sources owned by `user_id`. With `end_user_id`, only that end
+    user's — the isolation a user's own reads depend on. Without it, everything
+    the owner has connected, user-scoped rows included, since the owner
+    connected them all."""
+    where = "owner_user_id = $1"
+    args: list = [user_id]
+    if end_user_id is not None:
+        args.append(end_user_id)
+        where += " AND end_user_id = $2"
     rows = await get_pool().fetch(
-        f"SELECT obj.* FROM user_sources obj WHERE {predicate} "
-        "ORDER BY obj.source_type, obj.display_name",
-        user_id,
+        f"SELECT * FROM user_sources WHERE {where} ORDER BY source_type, display_name",
+        *args,
     )
     return [_source_row(r) for r in rows]
 
 
 async def get_owned_source(source_id: UUID, user_id: UUID) -> dict | None:
     """Fetch a connected source only if `user_id` OWNS it — the gate for
-    management and sync (reconfigure, delete, trigger re-index). Reads go through
-    get_readable_source, which also honours shares."""
+    management and sync (reconfigure, delete, trigger re-index)."""
     row = await get_pool().fetchrow(
         "SELECT * FROM user_sources WHERE id = $1 AND owner_user_id = $2",
         source_id,
@@ -415,10 +426,7 @@ async def get_source_by_type(owner_user_id: UUID, source_type: str) -> dict | No
 
 
 async def get_readable_source(source_id: UUID, user_id: UUID) -> dict | None:
-    """Fetch a connected source `user_id` may READ — they own it, or it was
-    shared with them. The row keeps its real owner_user_id, so downstream reads
-    fetch content with the OWNER's token (delegated access — the sharee never
-    sees the token). Management/sync stay owner-only via get_owned_source."""
+    """Fetch a connected source owned by the user or their workspace."""
     predicate = permission_service.readable_content_condition("source", "obj", 2)
     row = await get_pool().fetchrow(
         f"SELECT obj.* FROM user_sources obj WHERE obj.id = $1 AND {predicate}",
@@ -429,8 +437,8 @@ async def get_readable_source(source_id: UUID, user_id: UUID) -> dict | None:
 
 
 async def delete_source(source_id: UUID, user_id: UUID) -> bool:
-    """Remove a connected source the user owns: archived media blobs, share
-    grants, then the row (documents cascade). Same cleanup as the provider
+    """Remove a connected source the user owns: archived media blobs, then the
+    row (documents cascade). Same cleanup as the provider
     purge — one deletion codepath, nothing orphaned."""
     owned = await get_pool().fetchval(
         "SELECT 1 FROM user_sources WHERE id = $1 AND owner_user_id = $2",
@@ -445,8 +453,7 @@ async def delete_source(source_id: UUID, user_id: UUID) -> bool:
 
 
 async def _cleanup_source_data(source_ids: list[UUID]) -> None:
-    """What the FK cascade can't reach when source rows are deleted: media
-    archives in object storage (X/Instagram saves) and share grants."""
+    """Media archives the database cascade cannot remove from object storage."""
     from . import storage_service
 
     pool = get_pool()
@@ -468,10 +475,6 @@ async def _cleanup_source_data(source_ids: list[UUID]) -> None:
         # the array or it orphans every slide but the first.
         for item in row["media"]:
             await storage_service.delete_file(item["storage_key"])
-    await pool.execute(
-        "DELETE FROM shares WHERE object_type = 'source' AND object_id = ANY($1::uuid[])",
-        source_ids,
-    )
 
 
 def _provider_source_types(provider: str) -> list[str]:
@@ -566,6 +569,26 @@ async def due_sources(limit: int = 50) -> list[dict]:
         }
         for r in rows
     ]
+
+
+SKILL_BINDABLE_SOURCE_TYPES = ("google_drive_folder",)
+
+
+async def set_source_binds_skills(source_id: UUID, owner_user_id: UUID, binds_skills: bool) -> dict:
+    """Use a picked Drive folder for Skills, or stop.
+
+    Only a picked folder can be bound: its documents are crawled into
+    `drive_documents` with a path relative to the folder, which gives the
+    Skill collection a clear boundary. Binding a whole Drive or a
+    search-driven source would have no such boundary."""
+    row = await get_pool().fetchrow(
+        "UPDATE user_sources SET binds_skills = $3, updated_at = now() "
+        "WHERE id = $1 AND owner_user_id = $2 RETURNING *",
+        source_id,
+        owner_user_id,
+        binds_skills,
+    )
+    return _source_row(row)
 
 
 async def mark_sync_started(source_id: UUID) -> None:
@@ -1085,6 +1108,9 @@ async def list_documents(
     # Saves carry their archive status so listings can mark a save that failed
     # to archive (or is still archiving) instead of rendering it like the rest.
     status_column = "hydration_status" if table in SAVE_TABLES else "NULL::text"
+    shows_skill_status = table == "drive_documents" and source["binds_skills"]
+    skill_content_column = "left(content, 8192)" if shows_skill_status else "NULL::text"
+    extraction_status_column = "extraction_status" if shows_skill_status else "NULL::text"
     # X saves list newest-first — a bookmark list you can only read oldest-first
     # buries the thing you saved five minutes ago. The path's tweet id grows
     # over time but varies in digit count, so numeric order is (length, value).
@@ -1098,7 +1124,9 @@ async def list_documents(
         cursor_predicate = "path > $4"
     rows = await get_pool().fetch(
         f"SELECT path, name, kind, external_ref, external_updated_at, "
-        f"{size_column} AS size, {snippet_column} AS snippet, {status_column} AS status "
+        f"{size_column} AS size, {snippet_column} AS snippet, {status_column} AS status, "
+        f"{skill_content_column} AS skill_content, "
+        f"{extraction_status_column} AS extraction_status "
         f"FROM {table} "
         f"WHERE source_id = $1 AND deleted_at IS NULL AND path LIKE $2 AND {cursor_predicate} "
         f"ORDER BY {order_by} LIMIT $3",
@@ -1107,7 +1135,15 @@ async def list_documents(
         limit,
         after,
     )
-    return [_entry_row(r) for r in rows]
+    entries = [_entry_row(r) for r in rows]
+    if not shows_skill_status:
+        return entries
+
+    from .skill_service import source_document_skill_status
+
+    for entry, row in zip(entries, rows, strict=True):
+        entry.update(source_document_skill_status(row["skill_content"], row["extraction_status"]))
+    return entries
 
 
 def _entry_row(r) -> dict:
@@ -1660,7 +1696,7 @@ async def _readable_source_ids(
     """The sources the user may read, grouped by content table. Resolved before
     the FTS query so it filters by explicit source ids: Postgres skips tables
     with no readable sources outright instead of evaluating to_tsvector over
-    every tenant's documents and discarding them at the access check."""
+    every source's documents and discarding them at the access check."""
     source_types = [st for st, tb in SOURCE_TABLE.items() if tb in tables]
     readable = permission_service.readable_content_condition("source", "s", 1)
     rows = await get_pool().fetch(
@@ -1687,12 +1723,11 @@ async def search_documents(
     modified_after: datetime | None = None,
     modified_before: datetime | None = None,
 ) -> list[dict]:
-    """FTS over copied-content sources the user can read — their own or shared
-    with them (github/slack/granola), UNIONed across their tables. Pass `source`
+    """FTS over copied-content sources the user or their workspace owns,
+    UNIONed across their tables. Pass `source`
     to scope to one; an index-only source has nothing to FTS, so it returns [].
     Pass `providers` to restrict to those providers' tables — this must happen
-    at the table level, because readability includes sources shared directly
-    with the user that no connected-source listing enumerates.
+    at the table level so unrelated providers are never queried.
 
     Readable sources are resolved first and the FTS runs only over their rows
     (and only in their tables) — see _readable_source_ids."""
@@ -1797,7 +1832,7 @@ async def list_sources(owner_user_id: UUID, user_id: UUID) -> list[dict]:
     """Every source in this scope's view: the two native sources plus the
     scope's connected sources. In personal scope (owner == user) that is the
     caller's own view; in a workspace scope it is the workspace's connections
-    (the org Drive etc.), readable by every member."""
+    (the team Drive etc.), readable by every member."""
     sources = [
         {
             "source": NATIVE_FILES,
@@ -1812,7 +1847,13 @@ async def list_sources(owner_user_id: UUID, user_id: UUID) -> list[dict]:
             "display_name": "Session transcripts",
         },
     ]
-    for s in await list_connected_sources(owner_user_id):
+    from . import skill_service
+
+    connected = await list_connected_sources(owner_user_id)
+    # Counted once for the whole listing and only for folders used for Skills.
+    owned_shelves = [s["id"] for s in connected if s["binds_skills"]]
+    shelf_counts = await skill_service.count_shelf_skills(owner_user_id, owned_shelves)
+    for s in connected:
         item = {
             "source": s["id"],
             "provider": SOURCE_TYPE_PROVIDER[s["source_type"]],
@@ -1828,6 +1869,8 @@ async def list_sources(owner_user_id: UUID, user_id: UUID) -> list[dict]:
             "sync_warning": s["sync_warning"],
             "last_synced_at": s["last_synced_at"],
             "settings": s["settings"],
+            "binds_skills": s["binds_skills"],
+            **shelf_counts.get(s["id"], {}),
         }
         hint = _source_search_hint(s)
         if hint:
@@ -1911,11 +1954,6 @@ async def _audit_source_read(
         target_id = connected["id"]
         source_type = connected["source_type"]
         provider = SOURCE_TYPE_PROVIDER.get(source_type)
-        # Delegated read: a recipient reads a shared source through Stash, but the
-        # data belongs to the source owner. Attribute the trail to the owner so it
-        # lands in the OWNER's audit log — that's how they see who read what they
-        # shared. The reader is still recorded as the actor.
-        owner_user_id = UUID(connected["owner_user_id"])
 
     await security_audit_service.record_event(
         action=action,
@@ -2220,13 +2258,17 @@ async def source_document(
             else None
         )
     elif source == NATIVE_SESSIONS:
+        from . import session_ref_service
         from .memory_service import read_session_events
 
-        events = await read_session_events(owner_user_id, ref, user_id)
+        # Search names session hits by title and the VFS lists them by title,
+        # so a ref arriving here is as likely to be a title as an id.
+        session_id = (await session_ref_service.resolve(owner_user_id, user_id, ref))["session_id"]
+        events = await read_session_events(owner_user_id, session_id, user_id)
         transcript = "\n".join(
             f"[{e.get('event_type')}] {(e.get('content') or '')[:2000]}" for e in events
         )
-        doc = {"session": ref, "transcript": transcript[:8000]}
+        doc = {"session": session_id, "transcript": transcript[:8000]}
     else:
         connected = await _resolve_connected(source, owner_user_id, user_id)
         if connected is None:
@@ -2604,6 +2646,9 @@ async def _gather_search_candidates(
             return None
 
     async def session_hits() -> tuple[list[dict], list[dict]]:
+        from stashvfs import safe_name
+
+        from . import session_title_service
         from .memory_service import search_scope_events
 
         events = await search_scope_events(
@@ -2614,10 +2659,16 @@ async def _gather_search_candidates(
             modified_after=modified_after,
             modified_before=modified_before,
         )
+        # Session hits carry `name` — the session's display title in the VFS's
+        # spelling, so a hit can be followed straight into /sessions/<name>/.
+        # `ref` stays the raw session id; the web search page links with it.
+        ids = [sid for sid in {e.get("session_id") for e in events} if sid]
+        titles = await session_title_service.titles_for_session_ids(owner_user_id, ids)
         return [
             {
                 "source": NATIVE_SESSIONS,
                 "ref": e.get("session_id"),
+                "name": safe_name(titles.get(e.get("session_id"), e.get("session_id"))),
                 "snippet": _centered_window(e.get("content") or "", query, SEARCH_SNIPPET_CHARS),
                 "date_modified": e.get("created_at"),
             }
@@ -2676,9 +2727,7 @@ async def _gather_search_candidates(
         #
         # Copied-content sources go through our FTS (returns [] for index-only /
         # federated sources, which have no stored content to match). Unscoped
-        # search filters at the table level, not via searched_sources — FTS also
-        # reads sources shared directly with the user, which searched_sources
-        # never enumerates.
+        # search filters at the table level, not via searched_sources.
         ref_hits, docs, federated_results = await asyncio.gather(
             _external_ref_matches(
                 searched_sources, query, fetch_limit, modified_after, modified_before

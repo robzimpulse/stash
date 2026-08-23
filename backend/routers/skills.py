@@ -225,6 +225,22 @@ async def get_local_skill(
     return skill
 
 
+@me_router.get("/source-skills/{source_ref}")
+async def read_source_skill(
+    source_ref: str,
+    current_user: dict = Depends(get_current_user),
+    owner_user_id: UUID = Depends(get_scope),
+):
+    """Read one source-backed skill by the upstream file that backs it.
+    Addressed by file rather than name because a shelf can hold two documents
+    with the same title, and by the upstream id rather than ours because a
+    rename in Drive replaces our row."""
+    skill = await skill_service.read_source_skill(owner_user_id, source_ref, current_user["id"])
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    return skill
+
+
 async def _require_skill_folder(owner_user_id: UUID, folder_id: UUID, user_id: UUID) -> dict:
     folder = await files_tree_service.get_folder(folder_id)
     if not folder or folder["owner_user_id"] != owner_user_id:
@@ -386,7 +402,7 @@ class MaterializeSessionRequest(BaseModel):
 
 
 @me_router.post(
-    "/sessions/{session_id}/materialize",
+    "/sessions/materialize",
     response_model=PageResponse,
     status_code=201,
 )
@@ -406,6 +422,21 @@ async def materialize_session(
     if page is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return PageResponse(**{**page, "can_write": True})
+
+
+@me_router.post(
+    "/sessions/{session_id}/materialize",
+    response_model=PageResponse,
+    status_code=201,
+)
+async def materialize_session_legacy(
+    session_id: str,
+    req: MaterializeSessionRequest,
+    current_user: dict = Depends(get_current_user),
+    owner_user_id: UUID = Depends(get_scope),
+):
+    """LEGACY path shape for installed clients; dies with the legacy cutover."""
+    return await materialize_session(session_id, req, current_user, owner_user_id)
 
 
 @public_router.patch("/{skill_id}", response_model=SkillResponse)

@@ -8,6 +8,7 @@ session viewer can ship a Share button without involving the CLI.
 """
 
 import json
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
@@ -17,34 +18,35 @@ from ..auth import get_current_user, get_scope
 from ..config import settings
 from ..database import get_pool
 from ..services import (
-    files_tree_service,
     linear_ticket_service,
     memory_service,
     permission_service,
     security_audit_service,
     session_folder_service,
+    session_ref_service,
     session_service,
     session_title_service,
     storage_service,
-    user_scope_service,
 )
 
 router = APIRouter(prefix="/api/v1", tags=["sessions"])
 
+
 # Stable name for the auto-created folder that holds materialized sessions.
-SESSIONS_FOLDER_NAME = "Sessions"
-
-
 class SessionUpsertRequest(BaseModel):
     session_id: str = Field(..., min_length=1, max_length=128)
     agent_name: str = Field("", max_length=64)
     cwd: str | None = Field(None, max_length=1024)
     files_touched: list[str] = Field(default_factory=list)
+    # LEGACY filing lane for installed clients (Heavi's backend foremost):
+    # honored when sent, read by nothing new, no default resolved.
     session_folder_id: UUID | None = None
 
 
 def _session_app_url(session_id: str) -> str:
-    return f"{settings.PUBLIC_URL.rstrip('/')}/sessions/{session_id}"
+    # Session ids are the developer's own strings — slashes included — so the
+    # deep link encodes the whole id into one path segment.
+    return f"{settings.PUBLIC_URL.rstrip('/')}/sessions/{quote(session_id, safe='')}"
 
 
 def _session_response(row: dict, title: str | None = None) -> dict:
@@ -90,7 +92,6 @@ async def _session_artifacts(session_row_id: UUID) -> list[dict]:
 @router.get("/me/sessions")
 async def list_my_sessions(
     owner_user_id: UUID | None = Query(None),
-    session_folder_id: UUID | None = Query(None),
     session_id_prefix: str | None = Query(None, max_length=64),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -101,8 +102,6 @@ async def list_my_sessions(
     session_id. Each row carries the agent name, event count, first & last
     timestamps, and a preview of the first prompt.
 
-    Pass `session_folder_id` to scope to one folder — without it the list is a
-    global recent window, so a folder's older sessions would never appear.
     `session_id_prefix` narrows to one family of sessions by id — the chat
     sidebar asks for `agent-` so a user whose recent window is full of recorded
     CLI transcripts still sees their web chats; filtering client-side loses
@@ -114,83 +113,80 @@ async def list_my_sessions(
         owner_user_id = scope_user_id
     pool = get_pool()
     args: list = [current_user["id"]]
+    # Sessions rows are the unit here, not events: pick the page of sessions
+    # first (ordered by the last_event_at column ingest maintains), then read
+    # only that page's events for counts and title previews. The old shape
+    # aggregated every accessible history_events row before applying the
+    # limit, so an empty page still paid for the user's whole event history.
     accessible_ws = permission_service.accessible_scope_ids_sql(1)
-    title_where = [
-        "he_title.session_id IS NOT NULL",
-        f"(he_title.owner_user_id IN {accessible_ws} "
-        "OR (he_title.owner_user_id IS NULL AND he_title.created_by = $1))",
-        f"(he_title.owner_user_id IS NULL OR {memory_service.readable_session_event_condition('he_title', 1)})",
-        "NULLIF(BTRIM(he_title.content), '') IS NOT NULL",
-    ]
     where = [
-        "he.session_id IS NOT NULL",
-        f"(he.owner_user_id IN {accessible_ws} "
-        "OR (he.owner_user_id IS NULL AND he.created_by = $1))",
-        f"(he.owner_user_id IS NULL OR {memory_service.readable_session_event_condition('he', 1)})",
+        "s.deleted_at IS NULL",
+        # An empty session shell (row created, no events yet) stays hidden
+        # until its first event lands — same behavior the event-driven query
+        # had for free. One index probe per candidate row.
+        "EXISTS (SELECT 1 FROM history_events shell_he "
+        "        WHERE shell_he.owner_user_id = s.owner_user_id "
+        "          AND shell_he.session_id = s.session_id)",
+        f"s.owner_user_id IN {accessible_ws}",
+        permission_service.readable_content_condition("session", "s", 1),
     ]
     if owner_user_id is not None:
         args.append(owner_user_id)
-        where.append(f"he.owner_user_id = ${len(args)}")
-        title_where.append(f"he_title.owner_user_id = ${len(args)}")
-    if session_folder_id is not None:
-        args.append(session_folder_id)
-        where.append(f"s.session_folder_id = ${len(args)}")
+        where.append(f"s.owner_user_id = ${len(args)}")
     if session_id_prefix is not None:
         args.append(session_id_prefix)
         # starts_with, not LIKE: the prefix is caller-supplied and LIKE would
         # read '%' and '_' in it as wildcards.
-        where.append(f"starts_with(he.session_id, ${len(args)})")
-        title_where.append(f"starts_with(he_title.session_id, ${len(args)})")
+        where.append(f"starts_with(s.session_id, ${len(args)})")
 
     rows = await pool.fetch(
         f"""
-        WITH title_sources AS (
-          SELECT DISTINCT ON (he_title.owner_user_id, he_title.session_id)
-            he_title.owner_user_id,
-            he_title.session_id,
-            LEFT(he_title.content, 240) AS title_source
-          FROM history_events he_title
-          WHERE {" AND ".join(title_where)}
-          ORDER BY
-            he_title.owner_user_id,
-            he_title.session_id,
-            CASE
-              WHEN he_title.event_type IN ('user_message', 'user_prompt', 'prompt', 'message', 'user') THEN 0
-              WHEN he_title.event_type IN ('assistant_message', 'assistant') THEN 1
-              ELSE 2
-            END,
-            he_title.created_at,
-            he_title.id
+        WITH page AS (
+          SELECT s.id, s.owner_user_id, s.session_id, s.agent_name, s.created_by,
+                 s.session_folder_id, s.started_at, s.last_event_at
+          FROM sessions s
+          WHERE {" AND ".join(where)}
+          ORDER BY s.last_event_at DESC, s.session_id ASC, s.owner_user_id ASC
+          LIMIT {int(limit)} OFFSET {int(offset)}
         )
         SELECT
-          he.session_id,
-          s.id AS id,
-          s.session_folder_id,
-          sf.name AS session_folder_name,
-          he.owner_user_id,
+          p.session_id,
+          p.id AS id,
+          p.owner_user_id,
           owner.display_name AS owner_name,
-          {linear_ticket_service.sql_json_agg("s")} AS linear_tickets,
-          (ARRAY_AGG(NULLIF(u.display_name, '') ORDER BY he.created_at)
-           FILTER (WHERE NULLIF(u.display_name, '') IS NOT NULL))[1] AS user_name,
-          MAX(he.agent_name) AS agent_name,
-          title_sources.title_source,
-          COUNT(*)::INT AS event_count,
-          MIN(he.created_at) AS started_at,
-          MAX(he.created_at) AS last_event_at
-        FROM history_events he
-        LEFT JOIN title_sources ON title_sources.session_id = he.session_id
-          AND title_sources.owner_user_id IS NOT DISTINCT FROM he.owner_user_id
-        LEFT JOIN users owner ON owner.id = he.owner_user_id
-        LEFT JOIN users u ON u.id = he.created_by
-        LEFT JOIN sessions s ON s.owner_user_id IS NOT DISTINCT FROM he.owner_user_id
-          AND s.session_id = he.session_id
-          AND s.deleted_at IS NULL
-        LEFT JOIN session_folders sf ON sf.id = s.session_folder_id
-        WHERE {" AND ".join(where)}
-        GROUP BY he.session_id, he.owner_user_id, owner.display_name, s.id, s.session_folder_id,
-          sf.name, title_sources.title_source
-        ORDER BY last_event_at DESC, user_name ASC, session_id ASC
-        LIMIT {int(limit)} OFFSET {int(offset)}
+          {linear_ticket_service.sql_json_agg("p")} AS linear_tickets,
+          NULLIF(author.display_name, '') AS user_name,
+          p.agent_name,
+          sf.name AS session_folder_name,
+          title.title_source,
+          counts.event_count,
+          p.started_at,
+          p.last_event_at
+        FROM page p
+        LEFT JOIN users owner ON owner.id = p.owner_user_id
+        LEFT JOIN users author ON author.id = p.created_by
+        LEFT JOIN session_folders sf ON sf.id = p.session_folder_id
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*)::INT AS event_count
+          FROM history_events he
+          WHERE he.owner_user_id = p.owner_user_id AND he.session_id = p.session_id
+        ) counts ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT LEFT(he.content, 240) AS title_source
+          FROM history_events he
+          WHERE he.owner_user_id = p.owner_user_id AND he.session_id = p.session_id
+            AND NULLIF(BTRIM(he.content), '') IS NOT NULL
+          ORDER BY
+            CASE
+              WHEN he.event_type IN ('user_message', 'user_prompt', 'prompt', 'message', 'user') THEN 0
+              WHEN he.event_type IN ('assistant_message', 'assistant') THEN 1
+              ELSE 2
+            END,
+            he.created_at,
+            he.id
+          LIMIT 1
+        ) title ON TRUE
+        ORDER BY p.last_event_at DESC, user_name ASC, p.session_id ASC
         """,
         *args,
     )
@@ -226,13 +222,13 @@ async def upsert_session(
     # non-members, so no separate write check is needed).
     owner_user_id = scope_user_id
 
-    # A session always lands in a folder: the one it was pushed to, or the
-    # scope's Default folder (resolved by upsert_session when unset).
-    folder_id = req.session_folder_id
-    if folder_id is not None and not await session_folder_service.can_add_session_to_folder(
-        owner_user_id=owner_user_id,
-        user_id=current_user["id"],
-        folder_id=folder_id,
+    if (
+        req.session_folder_id is not None
+        and not await session_folder_service.can_add_session_to_folder(
+            owner_user_id=owner_user_id,
+            user_id=current_user["id"],
+            folder_id=req.session_folder_id,
+        )
     ):
         raise HTTPException(status_code=404, detail="Session folder not found")
 
@@ -242,7 +238,7 @@ async def upsert_session(
         agent_name=req.agent_name,
         cwd=req.cwd,
         created_by=current_user["id"],
-        session_folder_id=folder_id,
+        session_folder_id=req.session_folder_id,
     )
     if req.files_touched:
         await session_service.set_files_touched(row["id"], req.files_touched)
@@ -276,7 +272,35 @@ async def _session_detail_payload(
     return payload
 
 
-@router.get("/sessions/{session_id}")
+@router.get("/me/sessions/resolve")
+async def resolve_my_session(
+    ref: str = Query(..., min_length=1, max_length=256),
+    trashed: bool = Query(
+        False, description="Resolve against the trash instead (`stash restore`)."
+    ),
+    current_user: dict = Depends(get_current_user),
+    scope_user_id: UUID = Depends(get_scope),
+):
+    """What session a handle names — a title, the VFS's spelling of one, a
+    `/sessions/<name>` directory name, a session_id, or a row id.
+
+    `matched` is false for a handle that names no title: `session_id` and `id`
+    then echo the handle, since it is already an id and the endpoint that uses
+    it will reject it if it is not. Callers need no branch either way.
+
+    Declared above `/me/sessions/{session_id}` so the literal path wins.
+    """
+    try:
+        if trashed:
+            return await session_ref_service.resolve_trashed(scope_user_id, ref)
+        return await session_ref_service.resolve(scope_user_id, current_user["id"], ref)
+    except session_ref_service.SessionRefAmbiguous as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
+
+# session_id rides in the query, never the path: it is the developer's own
+# string and may contain anything, slashes included.
+@router.get("/sessions/detail")
 async def get_session_canonical(
     session_id: str,
     current_user: dict = Depends(get_current_user),
@@ -294,7 +318,7 @@ async def get_session_canonical(
     raise HTTPException(status_code=404, detail="Session not found")
 
 
-@router.get("/me/sessions/{session_id}")
+@router.get("/me/sessions/detail")
 async def get_my_session(
     session_id: str,
     current_user: dict = Depends(get_current_user),
@@ -311,7 +335,7 @@ class SessionTitleRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
 
 
-@router.patch("/me/sessions/{session_id}/title")
+@router.patch("/me/sessions/title")
 async def rename_my_session(
     session_id: str,
     body: SessionTitleRequest,
@@ -479,93 +503,34 @@ async def upload_session_artifact(
     return dict(row)
 
 
-async def _find_or_create_sessions_folder(owner_user_id: UUID, user_id: UUID) -> dict:
-    return await files_tree_service.find_or_create_root_folder(
-        owner_user_id, SESSIONS_FOLDER_NAME, user_id
-    )
+# --- LEGACY path shapes -----------------------------------------------------
+# Same story as the transcript aliases: installed clients read sessions by
+# /{session_id} path shapes. Registered last so every static route above
+# (detail, resolve, agent-names, …) wins. Dies with the legacy cutover.
 
 
-def _format_session_markdown(events: list[dict]) -> str:
-    if not events:
-        return "_No events in this session._"
-    parts: list[str] = []
-    started_at = events[0]["created_at"]
-    parts.append(f"_Started {started_at.isoformat()}, {len(events)} events_\n")
-    for ev in events:
-        agent = ev["agent_name"] or "agent"
-        etype = ev["event_type"] or "event"
-        tool = ev["tool_name"]
-        header = f"### {agent} - {etype}"
-        if tool:
-            header += f" - `{tool}`"
-        parts.append(header)
-        content = (ev["content"] or "").strip()
-        if content:
-            parts.append(content)
-        parts.append("")
-    return "\n".join(parts)
+@router.get("/sessions/{session_id}")
+async def get_session_canonical_legacy(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    return await get_session_canonical(session_id, current_user)
 
 
-@router.post("/me/sessions/{session_id}/materialize")
-async def materialize_session(
+@router.get("/me/sessions/{session_id}")
+async def get_my_session_legacy(
     session_id: str,
     current_user: dict = Depends(get_current_user),
     scope_user_id: UUID = Depends(get_scope),
 ):
-    owner_user_id = scope_user_id
-    """Idempotent: turn a session_id into a page in the scope's
-    Sessions folder, returning the page so the frontend can open ShareSheet
-    on it. Re-materializing the same session updates the existing page rather
-    than spawning duplicates."""
-    if not await user_scope_service.can_write(owner_user_id, current_user["id"]):
-        raise HTTPException(status_code=403, detail="Only the owner can materialize sessions")
-    if not await memory_service.can_read_session(owner_user_id, session_id, current_user["id"]):
-        raise HTTPException(status_code=404, detail="No events for that session in this scope")
+    return await get_my_session(session_id, current_user, scope_user_id)
 
-    pool = get_pool()
-    events = await pool.fetch(
-        "SELECT agent_name, event_type, tool_name, content, created_at "
-        "FROM history_events WHERE session_id = $1 AND owner_user_id = $2 "
-        "ORDER BY created_at",
-        session_id,
-        owner_user_id,
-    )
-    if not events:
-        raise HTTPException(status_code=404, detail="No events for that session in this scope")
 
-    folder = await _find_or_create_sessions_folder(owner_user_id, current_user["id"])
-
-    agent = (events[0]["agent_name"] or "agent").strip() or "agent"
-    started = events[0]["created_at"]
-    date_str = started.strftime("%Y-%m-%d %H:%M")
-    short_id = session_id.removeprefix("session-").removeprefix("session_")[:6] or session_id[:6]
-    page_name = f"{agent} - {date_str} - {short_id}"
-    content = _format_session_markdown([dict(e) for e in events])
-
-    # Idempotency by metadata.session_id, not by name — that way we can change
-    # the display name format without orphaning previously-materialized pages.
-    existing = await pool.fetchrow(
-        "SELECT id FROM pages "
-        "WHERE owner_user_id = $1 AND folder_id = $2 AND metadata->>'session_id' = $3 "
-        "AND deleted_at IS NULL LIMIT 1",
-        owner_user_id,
-        folder["id"],
-        session_id,
-    )
-    if existing:
-        page = await files_tree_service.update_page(
-            existing["id"],
-            owner_user_id,
-            current_user["id"],
-            content=content,
-        )
-    else:
-        page = await files_tree_service.create_page(
-            owner_user_id=owner_user_id,
-            name=page_name,
-            content=content,
-            created_by=current_user["id"],
-            folder_id=folder["id"],
-            metadata={"session_id": session_id, "materialized": True},
-        )
-    return {"page": page, "folder_id": str(folder["id"])}
+@router.patch("/me/sessions/{session_id}/title")
+async def rename_my_session_legacy(
+    session_id: str,
+    body: SessionTitleRequest,
+    current_user: dict = Depends(get_current_user),
+    scope_user_id: UUID = Depends(get_scope),
+):
+    return await rename_my_session(session_id, body, current_user, scope_user_id)

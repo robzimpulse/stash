@@ -8,7 +8,7 @@ agent, whose config shapes the turn.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -19,7 +19,7 @@ _COLUMNS = (
     "id, user_id, name, model_provider, system_prompt, run_mode, "
     "schedule_cron, schedule_prompt, is_default, is_curator, slack_bound, "
     "telegram_bound, last_run_at, last_run_error, last_run_outcome, curated_through, "
-    "month_run_count, month_run_anchor, created_at"
+    "curator_wiki, month_run_count, month_run_anchor, created_at"
 )
 
 
@@ -30,6 +30,21 @@ _COLUMNS = (
 # so sprite wakes don't all fire at once.
 CURATOR_WINDOW_START_HOUR_UTC = 8
 CURATOR_WINDOW_HOURS = 4
+
+
+def next_run_at(agent: dict) -> str | None:
+    """When this scheduled agent next fires, by the same rule the beat uses:
+    the first cron tick after its last run. None when it isn't scheduled or
+    its cron is unusable."""
+    from croniter import croniter
+
+    if agent.get("run_mode") != "scheduled" or not agent.get("schedule_cron"):
+        return None
+    base = agent.get("last_run_at") or datetime.now(UTC)
+    try:
+        return croniter(agent["schedule_cron"], base).get_next(datetime).isoformat()
+    except (ValueError, KeyError):
+        return None
 
 
 def _staggered_nightly_cron(user_id: UUID) -> str:
@@ -102,35 +117,48 @@ async def get_or_create_default(user_id: UUID) -> dict:
 CURATOR_BACKFILL_DAYS = 90
 
 
-async def get_or_create_curator(user_id: UUID) -> dict:
-    """The user's reserved Memory-curator agent, created on first use.
+async def get_or_create_curator(user_id: UUID, wiki: str = "internal") -> dict:
+    """The scope's reserved curator for one wiki, created on first use.
+
+    `wiki` is "internal" (the scope's own Memory wiki) or "external" (the
+    workspace's cross-user anonymized wiki). They are separate agents: separate
+    schedules, watermarks and run histories, because they write to different
+    places under opposite privacy rules.
 
     Scheduled nightly (staggered). Both the cron baseline (last_run_at) and the
     delta watermark (curated_through) seed to a bounded backfill point, so the
     first run is due immediately and bootstraps from real history."""
     pool = get_pool()
     row = await pool.fetchrow(
-        f"SELECT {_COLUMNS} FROM agents WHERE user_id = $1 AND is_curator", user_id
+        f"SELECT {_COLUMNS} FROM agents WHERE user_id = $1 AND is_curator AND curator_wiki = $2",
+        user_id,
+        wiki,
     )
     if row is not None:
         return _row(row)
+    name = "Memory curator" if wiki == "internal" else "External wiki curator"
     row = await pool.fetchrow(
         f"""
         INSERT INTO agents (user_id, name, run_mode, schedule_cron, is_curator,
-                            last_run_at, curated_through)
-        SELECT $1, 'Memory curator', 'scheduled', $2, true, backfill, backfill
+                            curator_wiki, last_run_at, curated_through)
+        SELECT $1, $4, 'scheduled', $2, true, $5, backfill, backfill
         FROM (SELECT greatest((SELECT created_at FROM users WHERE id = $1),
                               now() - make_interval(days => $3)) AS backfill) seed
-        ON CONFLICT (user_id) WHERE is_curator DO NOTHING
+        ON CONFLICT (user_id, curator_wiki) WHERE is_curator DO NOTHING
         RETURNING {_COLUMNS}
         """,
         user_id,
         _staggered_nightly_cron(user_id),
         CURATOR_BACKFILL_DAYS,
+        name,
+        wiki,
     )
     if row is None:  # lost the race — read the winner.
         row = await pool.fetchrow(
-            f"SELECT {_COLUMNS} FROM agents WHERE user_id = $1 AND is_curator", user_id
+            f"SELECT {_COLUMNS} FROM agents "
+            "WHERE user_id = $1 AND is_curator AND curator_wiki = $2",
+            user_id,
+            wiki,
         )
     return _row(row)
 
@@ -257,13 +285,29 @@ def month_runs_used(agent: dict) -> int:
     return agent["month_run_count"]
 
 
-async def mark_run(agent_id: UUID) -> int:
+async def mark_run(agent_id: UUID, metered: bool = True) -> int:
     """Consume the cron tick and meter the run against the calendar month.
     Returns the run count within the current month (including this one) —
     the free-tier curator credit gate reads it.
 
+    `metered=False` consumes the tick without touching the month counter —
+    for runs the platform initiates on its own (the first-day curator), which
+    must not eat the user's free allowance.
+
     Also clears last_run_error and stamps the outcome as started. Every path
     after this call must resolve the outcome as ran, failed, or skipped."""
+    if not metered:
+        return await get_pool().fetchval(
+            """
+            UPDATE agents SET
+                last_run_at = now(),
+                last_run_error = NULL,
+                last_run_outcome = 'started'
+            WHERE id = $1
+            RETURNING month_run_count
+            """,
+            agent_id,
+        )
     return await get_pool().fetchval(
         """
         UPDATE agents SET
@@ -281,20 +325,24 @@ async def mark_run(agent_id: UUID) -> int:
     )
 
 
-async def mark_run_failed(agent_id: UUID, error: str) -> None:
+async def mark_run_failed(agent_id: UUID, error: str, metered: bool = True) -> None:
     """Stamp the failure where the API can surface it, and refund the month
-    credit — an outage shouldn't eat the free allowance. The tick itself stays
-    consumed (last_run_at), so the beat won't re-fire the same window."""
+    credit — an outage shouldn't eat the free allowance. An unmetered run
+    (`metered=False`) never charged one, so it has nothing to refund. The tick
+    itself stays consumed (last_run_at), so the beat won't re-fire the same
+    window."""
     await get_pool().execute(
         """
         UPDATE agents SET
             last_run_error = left($2, 500),
             last_run_outcome = 'failed',
-            month_run_count = greatest(month_run_count - 1, 0)
+            month_run_count = CASE WHEN $3
+                THEN greatest(month_run_count - 1, 0) ELSE month_run_count END
         WHERE id = $1
         """,
         agent_id,
         error,
+        metered,
     )
 
 
@@ -321,6 +369,19 @@ async def mark_curated(agent_id: UUID, through) -> None:
     await get_pool().execute(
         "UPDATE agents SET curated_through = $2 WHERE id = $1", agent_id, through
     )
+
+
+async def set_system_prompt(agent_id: UUID, text: str | None) -> dict:
+    """The agent's persona — appended to its system prompt on every run.
+    Empty string clears it back to the default."""
+    row = await get_pool().fetchrow(
+        f"UPDATE agents SET system_prompt = $2 WHERE id = $1 RETURNING {_COLUMNS}",
+        agent_id,
+        text or None,
+    )
+    if row is None:
+        raise ValueError(f"agent {agent_id} not found")
+    return _row(row)
 
 
 async def channel_agent(user_id: UUID, channel: str) -> dict:

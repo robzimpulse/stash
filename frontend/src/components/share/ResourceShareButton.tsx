@@ -9,6 +9,8 @@ import {
   useState,
 } from "react";
 
+import { Select } from "@/components/ui/select";
+
 import { useEscapeKey } from "../../hooks/useEscapeKey";
 import {
   getGeneralAccess,
@@ -116,11 +118,6 @@ export function ResourceShareDialog({
   const [savingAccess, setSavingAccess] = useState(false);
 
   const supportsGeneralAccess = GENERAL_ACCESS_TYPES.includes(objectType);
-  // A connected source rides the owner's OAuth token, so the backend only
-  // grants recipients read access and rejects comment/write. Collapse the
-  // permission controls to a static "Can view" rather than offer a level the
-  // POST would 400 on.
-  const readOnlyShare = objectType === "source";
 
   useEscapeKey(true, onClose);
 
@@ -290,27 +287,15 @@ export function ResourceShareDialog({
             placeholder="Add people by email"
             className="min-w-0 flex-1 rounded-md border border-border bg-base px-3 py-2 text-[13px] text-foreground placeholder:text-muted-foreground focus:border-brand focus:outline-none"
           />
-          {readOnlyShare ? (
-            <span className="flex items-center rounded-md border border-border bg-surface px-2.5 py-2 text-[12px] text-muted-foreground">
-              Can view
-            </span>
-          ) : (
-            <select
-              value={permission}
-              onChange={(event) =>
-                setPermission(event.target.value as SharePermission)
-              }
-              disabled={busy}
-              aria-label="Invite permission"
-              className="rounded-md border border-border bg-base px-2 py-2 text-[12px] text-foreground"
-            >
-              {PERMISSIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          )}
+          <Select
+            value={permission}
+            onChange={(v) => setPermission(v as SharePermission)}
+            disabled={busy}
+            aria-label="Invite permission"
+            portal={false}
+            options={PERMISSIONS}
+            className="px-2 py-2 text-[12px]"
+          />
           <button
             type="submit"
             disabled={busy || !email.trim()}
@@ -349,9 +334,8 @@ export function ResourceShareDialog({
                     : share.email ?? share.principal_type
                 }
                 permission={share.permission as SharePermission}
-                permissionLabel={readOnlyShare ? "Can view" : undefined}
                 onChangePermission={
-                  share.email && !readOnlyShare
+                  share.email
                     ? (next) => void changePermission(share, next)
                     : undefined
                 }
@@ -401,24 +385,21 @@ export function ResourceShareDialog({
           <span className="min-w-0 flex-1">
             {supportsGeneralAccess ? (
               <>
-                <select
-                  aria-label="General access"
+                <Select
+                  aria-label="General access" portal={false}
                   value={generalAccess === "none" ? "none" : "link"}
                   disabled={savingAccess}
-                  onChange={(e) =>
+                  onChange={(v) =>
                     void changeGeneralAccess(
-                      e.target.value === "none"
-                        ? "none"
-                        : generalAccess === "none"
-                          ? "read"
-                          : generalAccess,
+                      v === "none" ? "none" : generalAccess === "none" ? "read" : generalAccess,
                     )
                   }
-                  className="-ml-1 block cursor-pointer rounded border-none bg-transparent px-1 py-0.5 text-[13px] font-medium text-foreground hover:bg-raised focus:outline-none disabled:opacity-60"
-                >
-                  <option value="none">Restricted</option>
-                  <option value="link">Anyone with the link</option>
-                </select>
+                  options={[
+                    { value: "none", label: "Restricted" },
+                    { value: "link", label: "Anyone with the link" },
+                  ]}
+                  className="-ml-1 border-none bg-transparent px-1 py-0.5 text-[13px] font-medium hover:bg-raised"
+                />
                 <span className="block truncate px-1 text-[12px] text-muted-foreground">
                   {generalAccess === "none"
                     ? "Only people with access can open this link"
@@ -437,21 +418,14 @@ export function ResourceShareDialog({
             )}
           </span>
           {supportsGeneralAccess && generalAccess !== "none" && (
-            <select
-              aria-label="Link role"
+            <Select
+              aria-label="Link role" portal={false}
               value={generalAccess}
               disabled={savingAccess}
-              onChange={(e) =>
-                void changeGeneralAccess(e.target.value as GeneralPermission)
-              }
-              className="shrink-0 cursor-pointer rounded border border-border bg-base px-2 py-1 text-[12px] font-medium text-foreground hover:bg-raised focus:outline-none disabled:opacity-60"
-            >
-              {LINK_ROLES.map((role) => (
-                <option key={role.value} value={role.value}>
-                  {role.label}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => void changeGeneralAccess(v as GeneralPermission)}
+              options={LINK_ROLES}
+              className="shrink-0 px-2 py-1 text-[12px] font-medium"
+            />
           )}
         </div>
       </section>
@@ -509,21 +483,14 @@ function AccessRow({
         <span className="block truncate text-[12px] text-muted-foreground">{sublabel}</span>
       </span>
       {onChangePermission && permission ? (
-        <select
+        <Select
           value={permission}
-          onChange={(event) =>
-            onChangePermission(event.target.value as SharePermission)
-          }
+          onChange={(v) => onChangePermission(v as SharePermission)}
           disabled={busy}
-          aria-label="Change permission"
-          className="shrink-0 rounded-md border border-border bg-base px-1.5 py-1 text-[12px] text-foreground disabled:opacity-45"
-        >
-          {PERMISSIONS.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
+          aria-label="Change permission" portal={false}
+          options={PERMISSIONS}
+          className="shrink-0 px-1.5 py-1 text-[12px]"
+        />
       ) : (
         <span className="shrink-0 text-[12px] text-muted-foreground">{permissionLabel}</span>
       )}
