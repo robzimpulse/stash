@@ -7,6 +7,9 @@ import { ArrowLeft } from "lucide-react";
 
 import DeveloperGate from "@/components/developer/DeveloperGate";
 import { Code, PageHeading, SectionHeading } from "@/components/developer/DocsPrimitives";
+import UserDriveSourceControls from "@/components/developer/UserDriveSourceControls";
+import UserFileUploadControls from "@/components/developer/UserFileUploadControls";
+import UserSessionUploadControls from "@/components/developer/UserSessionUploadControls";
 import WikiToggle from "@/components/developer/WikiToggle";
 import WikiGraph from "@/components/memory/WikiGraph";
 import {
@@ -148,6 +151,7 @@ function UserDetail() {
 
       <section className="mb-12">
         <SectionHeading>Sessions</SectionHeading>
+        <UserSessionUploadControls externalUserId={user.external_id} onAdded={refresh} />
         {sessions.length === 0 ? (
           <Empty>No sessions yet for this user.</Empty>
         ) : (
@@ -183,10 +187,11 @@ function UserDetail() {
           uploaded with their <Code>user_id</Code>, and integrations connected for them
           alone. Your other users never see any of it.
         </p>
+        <UserFileUploadControls externalUserId={user.external_id} onAdded={refresh} />
         {files.length === 0 ? (
           <Empty>
-            No files yet. Files arrive when your backend uploads one with this user&apos;s{" "}
-            <Code>user_id</Code>.
+            No files yet. Upload one here, or have your backend upload one with this
+            user&apos;s <Code>user_id</Code>.
           </Empty>
         ) : (
           <div className="mt-4 overflow-hidden rounded border border-border bg-surface">
@@ -208,6 +213,14 @@ function UserDetail() {
         )}
         <div className="mt-6 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
           Connected sources
+        </div>
+        <div className="mt-3 rounded border border-border bg-surface px-5 py-4">
+          <div className="text-[14.5px] text-foreground">Assign a Google Drive folder</div>
+          <p className="mt-1 text-[13px] leading-6 text-muted-foreground">
+            Only this user&apos;s agent can browse the folder. Other users in the workspace
+            cannot see it.
+          </p>
+          <UserDriveSourceControls externalUserId={user.external_id} onAdded={refresh} />
         </div>
         {sources.length === 0 ? (
           <Empty>
