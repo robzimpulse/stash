@@ -2,20 +2,22 @@
 
 What matters here:
 - Activation is self-serve and idempotent: a solo developer gets a one-man,
-  invite-only (NULL-domain) workspace with the wiki and notepads folders; the
+  invite-only (NULL-domain) workspace with the wiki and user-wikis folders; the
   creator is an explicit member, since no domain rule will ever cover them.
 - The user contract: `user_id` on an events upload names the developer's own
-  id for their end user. First sight creates the user and their notepad folder;
+  id for their end user. First sight creates the user and their wiki folder;
   the session row is stamped set-once, so a user's session can never migrate to
   another user later.
 - User ids only work on developer workspace scopes — a personal upload
   carrying user_id fails loud, it never silently drops the user.
 - The user-scoped VFS shows one user's world and nothing else's: the shared
-  wiki at /memory, that user's notepad and files under /files, that user's
+  wiki at /memory, that user's own wiki and files under /files, that user's
   transcripts under /sessions. Another user's material must be invisible —
   that is the entire product promise to the developer's customers.
 """
 
+import io
+import json
 import uuid
 
 import pytest
@@ -75,7 +77,7 @@ async def test_activate_creates_one_man_workspace(client: AsyncClient, pool):
 
     assert workspace["domain"] is None
     assert workspace["external_wiki_folder_id"] is not None
-    assert workspace["end_user_notepads_folder_id"] is not None
+    assert workspace["end_user_wikis_folder_id"] is not None
 
     # The creator is an explicit member: the workspace scope works for them.
     resp = await client.get(
@@ -127,7 +129,7 @@ async def test_user_upload_creates_end_user_and_stamps_session(client: AsyncClie
     assert end_user is not None
     assert end_user["name"] == "Riverside Truck"
     assert end_user["share_wiki"] is True
-    assert end_user["notepad_folder_id"] is not None
+    assert end_user["wiki_folder_id"] is not None
 
     session = await pool.fetchrow(
         "SELECT end_user_id FROM sessions WHERE owner_user_id = $1 AND session_id = 'sess-riverside-1'",
@@ -190,19 +192,19 @@ async def test_user_vfs_isolates_users(client: AsyncClient, pool):
         ],
     )
 
-    # Seed a wiki page (shared) and a page in each user's notepad.
+    # Seed a wiki page (shared) and a page in each user's own wiki.
     end_users = {
         r["external_id"]: r
         for r in await pool.fetch(
-            "SELECT external_id, notepad_folder_id FROM end_users WHERE workspace_id = $1",
+            "SELECT external_id, wiki_folder_id FROM end_users WHERE workspace_id = $1",
             uuid.UUID(workspace["id"]),
         )
     }
     scope_id = uuid.UUID(workspace["scope_user_id"])
     for name, folder_id in [
         ("Fault codes", uuid.UUID(workspace["external_wiki_folder_id"])),
-        ("Acme notes", end_users["org_acme"]["notepad_folder_id"]),
-        ("Beta notes", end_users["org_beta"]["notepad_folder_id"]),
+        ("Acme notes", end_users["org_acme"]["wiki_folder_id"]),
+        ("Beta notes", end_users["org_beta"]["wiki_folder_id"]),
     ]:
         await pool.execute(
             "INSERT INTO pages (owner_user_id, name, content_markdown, folder_id, created_by) "
@@ -220,13 +222,69 @@ async def test_user_vfs_isolates_users(client: AsyncClient, pool):
     assert resp.status_code == 200, resp.text
     listing = resp.json()["stdout"]
 
-    # Acme's world: the shared wiki, its own notepad, its own session.
+    # Acme's world: the shared wiki, its own wiki, its own session.
     assert "Fault codes" in listing
     assert "Acme notes" in listing
     assert "sess-acme-1" in listing or "hello from sess-acme-1" in listing
 
     # Nothing of Beta's or the developer's internal activity.
     assert "Beta notes" not in listing
+    assert "sess-beta-1" not in listing
+    assert "sess-internal" not in listing
+
+
+@pytest.mark.asyncio
+async def test_developer_workspace_without_user_id_reads_only_shared_wiki(
+    client: AsyncClient, pool
+):
+    """A developer can search shared product knowledge without impersonating an
+    end user. Omitting user_id must narrow access to the shared wiki; it must
+    never expose any user's private wiki or transcripts."""
+    api_key, _, workspace = await _developer(client)
+    machine_key = await _mint_workspace_key(client, api_key, workspace)
+    await _push(
+        client,
+        machine_key,
+        [
+            _event("sess-acme-1", user_id="org_acme", user_name="Acme"),
+            _event("sess-beta-1", user_id="org_beta", user_name="Beta"),
+            _event("sess-internal"),
+        ],
+    )
+
+    end_users = {
+        r["external_id"]: r
+        for r in await pool.fetch(
+            "SELECT external_id, wiki_folder_id FROM end_users WHERE workspace_id = $1",
+            uuid.UUID(workspace["id"]),
+        )
+    }
+    scope_id = uuid.UUID(workspace["scope_user_id"])
+    for name, folder_id in [
+        ("Fault codes", uuid.UUID(workspace["external_wiki_folder_id"])),
+        ("Acme notes", end_users["org_acme"]["wiki_folder_id"]),
+        ("Beta notes", end_users["org_beta"]["wiki_folder_id"]),
+    ]:
+        await pool.execute(
+            "INSERT INTO pages (owner_user_id, name, content_markdown, folder_id, created_by) "
+            "VALUES ($1, $2, 'body', $3, $1)",
+            scope_id,
+            name,
+            folder_id,
+        )
+
+    resp = await client.post(
+        "/api/v1/me/vfs",
+        json={"script": "find / -type f"},
+        headers=_auth(machine_key),
+    )
+    assert resp.status_code == 200, resp.text
+    listing = resp.json()["stdout"]
+
+    assert "Fault codes" in listing
+    assert "Acme notes" not in listing
+    assert "Beta notes" not in listing
+    assert "sess-acme-1" not in listing
     assert "sess-beta-1" not in listing
     assert "sess-internal" not in listing
 
@@ -255,8 +313,207 @@ async def test_new_user_reads_the_shared_wiki_before_they_have_written(client: A
     assert resp.status_code == 200, resp.text
     listing = resp.json()["stdout"]
     assert "Fault codes" in listing
-    # It owns nothing yet — no notepad, no sessions of its own.
-    assert "notepad" not in listing
+    # It owns nothing yet — no wiki folder, no sessions of its own.
+    assert "wiki" not in listing
+
+
+@pytest.mark.asyncio
+async def test_user_scoped_source_is_visible_to_that_user_only(client: AsyncClient, pool):
+    """A developer can connect a source (e.g. a customer's Drive folder) FOR
+    one end user: `user_id` on the connect call stamps the source, that user's
+    VFS lists it under /sources, and no other user ever sees it — a customer's
+    Drive folder belongs to that customer, never to the developer's other
+    customers."""
+    api_key, _, workspace = await _developer(client)
+    machine_key = await _mint_workspace_key(client, api_key, workspace)
+
+    # The users exist once something is written for them.
+    await _push(
+        client,
+        machine_key,
+        [
+            _event("sess-acme-1", user_id="org_acme", user_name="Acme"),
+            _event("sess-beta-1", user_id="org_beta", user_name="Beta"),
+        ],
+    )
+
+    # Connecting is a write, so it comes from the developer's own key in
+    # workspace scope — the read machine key is for the agent's reads.
+    # external_ref + display_name given directly: the Drive folder-name
+    # lookup is the only part that needs a live Google token.
+    scope = {**_auth(api_key), "X-Stash-Scope": workspace["scope_user_id"]}
+    resp = await client.post(
+        "/api/v1/me/sources",
+        json={
+            "source_type": "google_drive_folder",
+            "external_ref": "drive-folder-acme",
+            "display_name": "Acme fleet records",
+            "user_id": "org_acme",
+        },
+        headers=scope,
+    )
+    assert resp.status_code == 200, resp.text
+
+    # Connecting for a user the workspace has never seen fails loud.
+    resp = await client.post(
+        "/api/v1/me/sources",
+        json={
+            "source_type": "google_drive_folder",
+            "external_ref": "drive-folder-nobody",
+            "display_name": "Nobody's folder",
+            "user_id": "org_never_written",
+        },
+        headers=scope,
+    )
+    assert resp.status_code == 400
+
+    # The source row is stamped to Acme.
+    row = await pool.fetchrow(
+        "SELECT eu.external_id FROM user_sources us JOIN end_users eu ON eu.id = us.end_user_id "
+        "WHERE us.owner_user_id = $1 AND us.display_name = 'Acme fleet records'",
+        uuid.UUID(workspace["scope_user_id"]),
+    )
+    assert row and row["external_id"] == "org_acme"
+
+    # /sources mounts by provider: the connected Drive shows up in Acme's
+    # view and is absent from Beta's — the isolation the feature is for.
+    async def sources_listing(user_id: str) -> str:
+        resp = await client.post(
+            "/api/v1/me/vfs",
+            json={"script": "ls /sources", "user_id": user_id},
+            headers=_auth(machine_key),
+        )
+        assert resp.status_code == 200, resp.text
+        return resp.json()["stdout"]
+
+    assert "google" in await sources_listing("org_acme")
+    assert "google" not in await sources_listing("org_beta")
+
+    resp = await client.post(
+        "/api/v1/me/vfs",
+        json={"script": "ls /sources"},
+        headers=_auth(machine_key),
+    )
+    assert resp.status_code == 200, resp.text
+    assert "google" not in resp.json()["stdout"]
+
+
+# --- Manual per-user material (console) ---
+
+_TRANSCRIPT = (
+    json.dumps({"type": "user", "message": {"content": "hi"}, "timestamp": "2026-05-10T20:00:00Z"})
+    + "\n"
+    + json.dumps(
+        {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "hello"}]},
+            "timestamp": "2026-05-10T20:00:01Z",
+        }
+    )
+    + "\n"
+).encode()
+
+
+async def _developer_with_user(client: AsyncClient) -> tuple[dict, dict]:
+    """An activated workspace with one end user (org_acme).
+    Returns (scope_headers, workspace)."""
+    api_key, _, workspace = await _developer(client)
+    machine_key = await _mint_workspace_key(client, api_key, workspace)
+    await _push(client, machine_key, [_event("sess-seed", user_id="org_acme", user_name="Acme")])
+    return {**_auth(api_key), "X-Stash-Scope": workspace["scope_user_id"]}, workspace
+
+
+@pytest.mark.asyncio
+async def test_transcript_upload_with_user_files_session_under_them(client: AsyncClient, pool):
+    """The console can hand a user a session by uploading its transcript —
+    it must land inside that user's privacy boundary exactly as if their
+    product's backend had streamed it."""
+    scope, workspace = await _developer_with_user(client)
+
+    resp = await client.post(
+        "/api/v1/me/transcripts",
+        files={"file": ("s.jsonl", io.BytesIO(_TRANSCRIPT), "application/jsonl")},
+        data={"session_id": "sess-manual-1", "agent_name": "support-bot", "user_id": "org_acme"},
+        headers=scope,
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["imported"] == 2
+
+    row = await pool.fetchrow(
+        "SELECT eu.external_id FROM sessions s JOIN end_users eu ON eu.id = s.end_user_id "
+        "WHERE s.owner_user_id = $1 AND s.session_id = 'sess-manual-1'",
+        uuid.UUID(workspace["scope_user_id"]),
+    )
+    assert row and row["external_id"] == "org_acme"
+
+
+@pytest.mark.asyncio
+async def test_transcript_upload_for_unknown_user_fails_loud(client: AsyncClient):
+    scope, _ = await _developer_with_user(client)
+    resp = await client.post(
+        "/api/v1/me/transcripts",
+        files={"file": ("s.jsonl", io.BytesIO(_TRANSCRIPT), "application/jsonl")},
+        data={"session_id": "sess-x", "agent_name": "support-bot", "user_id": "org_never_seen"},
+        headers=scope,
+    )
+    assert resp.status_code == 400
+    assert "unknown user" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_transcript_upload_cannot_move_a_session_between_users(client: AsyncClient):
+    """sess-seed was born into org_acme's boundary; re-uploading it under
+    another user must refuse rather than migrate or cross-file events."""
+    scope, workspace = await _developer_with_user(client)
+    machine_key_scope = scope
+
+    resp = await client.post(
+        "/api/v1/me/sessions/events/batch",
+        json={"events": [_event("sess-b", user_id="org_beta", user_name="Beta")]},
+        headers=machine_key_scope,
+    )
+    assert resp.status_code == 201, resp.text
+
+    resp = await client.post(
+        "/api/v1/me/transcripts",
+        files={"file": ("s.jsonl", io.BytesIO(_TRANSCRIPT), "application/jsonl")},
+        data={"session_id": "sess-seed", "agent_name": "support-bot", "user_id": "org_beta"},
+        headers=scope,
+    )
+    assert resp.status_code == 400
+    assert "already belongs" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_file_upload_with_user_scopes_the_file(client: AsyncClient, pool, monkeypatch):
+    """The console's manual file upload rides the existing user_id form
+    field: the file row is stamped to the user, so only their agent sees it."""
+    from backend.services import storage_service
+    from backend.tasks import extraction
+
+    async def _upload(owner_user_id, filename, content, content_type):
+        return f"test/{owner_user_id}/{filename}"
+
+    monkeypatch.setattr(storage_service, "is_configured", lambda: True)
+    monkeypatch.setattr(storage_service, "upload_file", _upload)
+    monkeypatch.setattr(extraction.extract_file_text, "delay", lambda *a, **k: None)
+
+    scope, workspace = await _developer_with_user(client)
+
+    resp = await client.post(
+        "/api/v1/me/files",
+        files={"file": ("coverage.pdf", io.BytesIO(b"%PDF-1.4 test"), "application/pdf")},
+        data={"user_id": "org_acme"},
+        headers=scope,
+    )
+    assert resp.status_code == 201, resp.text
+
+    row = await pool.fetchrow(
+        "SELECT eu.external_id FROM files f JOIN end_users eu ON eu.id = f.end_user_id "
+        "WHERE f.owner_user_id = $1 AND f.name = 'coverage.pdf'",
+        uuid.UUID(workspace["scope_user_id"]),
+    )
+    assert row and row["external_id"] == "org_acme"
 
 
 @pytest.mark.asyncio
@@ -453,14 +710,14 @@ async def test_console_files_split_by_wiki_and_user(client: AsyncClient, pool):
     end_users = {
         r["external_id"]: r
         for r in await pool.fetch(
-            "SELECT external_id, notepad_folder_id FROM end_users WHERE workspace_id = $1",
+            "SELECT external_id, wiki_folder_id FROM end_users WHERE workspace_id = $1",
             uuid.UUID(workspace["id"]),
         )
     }
     scope_id = uuid.UUID(workspace["scope_user_id"])
     for name, folder_id in [
         ("Fault codes", uuid.UUID(workspace["external_wiki_folder_id"])),
-        ("Acme notes", end_users["org_acme"]["notepad_folder_id"]),
+        ("Acme notes", end_users["org_acme"]["wiki_folder_id"]),
     ]:
         await pool.execute(
             "INSERT INTO pages (owner_user_id, name, content_markdown, folder_id, created_by) "
@@ -478,8 +735,8 @@ async def test_console_files_split_by_wiki_and_user(client: AsyncClient, pool):
     body = resp.json()
     assert [p["name"] for p in body["wiki_pages"]] == ["Fault codes"]
     by_user = {u["external_id"]: u for u in body["users"]}
-    assert [p["name"] for p in by_user["org_acme"]["notepad_pages"]] == ["Acme notes"]
-    assert by_user["org_beta"]["notepad_pages"] == []
+    assert [p["name"] for p in by_user["org_acme"]["wiki_pages"]] == ["Acme notes"]
+    assert by_user["org_beta"]["wiki_pages"] == []
 
 
 @pytest.mark.asyncio
@@ -564,14 +821,14 @@ async def test_user_wiki_graph(client: AsyncClient, pool):
     end_users = {
         r["external_id"]: r
         for r in await pool.fetch(
-            "SELECT id, external_id, notepad_folder_id FROM end_users WHERE workspace_id = $1",
+            "SELECT id, external_id, wiki_folder_id FROM end_users WHERE workspace_id = $1",
             uuid.UUID(workspace["id"]),
         )
     }
     scope_id = uuid.UUID(workspace["scope_user_id"])
     for name, folder_id in [
-        ("Acme notes", end_users["org_acme"]["notepad_folder_id"]),
-        ("Beta notes", end_users["org_beta"]["notepad_folder_id"]),
+        ("Acme notes", end_users["org_acme"]["wiki_folder_id"]),
+        ("Beta notes", end_users["org_beta"]["wiki_folder_id"]),
     ]:
         await pool.execute(
             "INSERT INTO pages (owner_user_id, name, content_markdown, folder_id, created_by) "
