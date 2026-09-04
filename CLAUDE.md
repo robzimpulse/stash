@@ -211,6 +211,15 @@ Default to surfacing uncertainty, not hiding it.
   broken". Fix: mirror `moveSelectedToFolder` and `setDrillRefresh(n => n + 1)` after deletes, and
   verify with a browser click-through (folder-scoped refetch fires, row count drops). General rule:
   any mutation that can run while a drill is open must bump the same key the move path uses.
+- **2026-09-04 — `make up` never applies personal-branch Dockerfile changes; agent turns fail with a redacted FileNotFoundError.**
+  The local stack runs the GHCR image from `docker-compose.prod.yml` (built by CI from **main**). `make down && make up`
+  only restarts that image, so this branch's claude + stashai install in `backend/Dockerfile` (present on `personal`,
+  never merged to main) was missing from the running container. Local-mode `/agents` then spawns `claude`, gets
+  `FileNotFoundError`, and the blanket handler in `sprite_agent_service._pump_turn` surfaces it as the generic
+  "The agent turn failed. Try again." Diagnosis trail: the DB session history shows the failure ~130ms after the user
+  message with zero tool events; `which claude` in `stash-backend-1` finds nothing. Fix: `make build` after merging
+  main into personal (signpost added to the Makefile); durable fix is merging the Dockerfile block to main. Same class
+  as the 2026-08-05 stash-CLI lesson: local-mode agents need their substrate CLIs baked into the image.
 - **2026-08-05 — Workbench session tabs survive deletion and become dead "breadcrumbs".**
   The tab strip (`moltchat_workspace` localStorage, `workspace-store.ts`) keeps a `session` tab for
   every session you open; nothing closed it when the session was deleted, so the deleted session
