@@ -142,9 +142,6 @@ export default function SkillSessionsPage() {
       closeSessionTabs(targets.map((s) => s.session_id));
       clearSelection();
       await load();
-      // FolderDrill holds its own list and only refetches when this key bumps;
-      // without it deleted sessions stay visible until the drill remounts.
-      setDrillRefresh((n) => n + 1);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
     }
