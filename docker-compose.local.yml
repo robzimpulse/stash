@@ -5,29 +5,50 @@
 #
 # Caddy is disabled here because local hosting does not need 80/443, HTTPS,
 # or domain routing. The app is exposed directly on the product dev ports.
+#
+# Persistence: state lives on the host under STASH_DATA_DIR (see .env.example,
+# default ./data) as postgres/, redis/, and secrets/ instead of named Docker
+# volumes. Compose merges volume lists by container path, so each entry below
+# replaces the prod named volume for that path.
 
 services:
+  postgres:
+    volumes:
+      - ${STASH_DATA_DIR:-./data}/postgres:/var/lib/postgresql/data
+
+  redis:
+    volumes:
+      - ${STASH_DATA_DIR:-./data}/redis:/data
+
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
     ports:
       - "3456:3456"
+    volumes:
+      - ${STASH_DATA_DIR:-./data}/secrets:/app/.secrets
 
   worker:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    volumes:
+      - ${STASH_DATA_DIR:-./data}/secrets:/app/.secrets
 
   heavy-worker:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    volumes:
+      - ${STASH_DATA_DIR:-./data}/secrets:/app/.secrets
 
   beat:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    volumes:
+      - ${STASH_DATA_DIR:-./data}/secrets:/app/.secrets
 
   frontend:
     build:
