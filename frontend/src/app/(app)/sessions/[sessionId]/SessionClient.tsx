@@ -28,7 +28,7 @@ import {
 } from "@/lib/api";
 import EditableTitle from "@/components/content/EditableTitle";
 import { getScope } from "@/lib/scope-store";
-import { useTabTitle } from "@/lib/workspace-store";
+import { closeSessionTabs, useTabTitle } from "@/lib/workspace-store";
 
 // One transcript page. The viewer loads this many turns at a time and fetches
 // more on scroll, so long sessions don't load every event up front.
@@ -222,6 +222,7 @@ export default function SessionViewerPage({ sessionId }: { sessionId: string }) 
                 if (!ok) return;
                 try {
                   await trashItem("session", sessionDetail.id);
+                  closeSessionTabs([sessionId]);
                   router.push("/sessions");
                 } catch (e) {
                   setError(e instanceof Error ? e.message : "Delete failed");
@@ -238,16 +239,26 @@ export default function SessionViewerPage({ sessionId }: { sessionId: string }) 
   const load = useCallback(async () => {
     try {
       const detail = await getSessionDetail(sessionId);
+      setSessionDetail(detail);
+      setAgentName(detail.agent_name || "");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load session");
+      return;
+    }
+    // The transcript and the session row can disagree (a session with no
+    // readable turns, or one deleted elsewhere). The detail still renders so
+    // header actions like Delete stay available — a failed transcript alone
+    // must not strand the page without any actions.
+    try {
       const page = await getSessionEventsPage(sessionId, TRANSCRIPT_PAGE_SIZE, 0);
       setAgentName(
-        detail.agent_name || page.events.find((event) => event.agent_name)?.agent_name || ""
+        (prev) => prev || page.events.find((event) => event.agent_name)?.agent_name || ""
       );
-      setSessionDetail(detail);
       setTurns(page.events.map(eventToTurn));
       setTotalTurns(page.total);
       setHasMore(page.has_more);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load session");
+      setError(e instanceof Error ? e.message : "Failed to load transcript");
     }
   }, [sessionId]);
 

@@ -195,3 +195,38 @@ If you genuinely think a convention is harmful, surface it. Don't fork silently.
 "Completed" is wrong if anything was skipped silently.
 "Tests pass" is wrong if any were skipped.
 Default to surfacing uncertainty, not hiding it.
+
+## Lessons learned
+- **2026-08-05 — Local-mode agents can't see the host's CLIs.** The Memory
+  curator runs inside the backend/worker container (`AGENT_EXEC_MODE=local`),
+  so every CLI its prompt depends on must be installed in `backend/Dockerfile`
+  (the `stash` CLI was missing → "command not found") and authenticated via
+  the harness env (`STASH_URL`/`STASH_API_KEY` in `agent_auth.resolve`), not
+  inherited from the host. Verify by rebuilding the image and triggering
+  `stash memory --recompute`.
+- **2026-08-05 — Folder drills keep their own session list; every mutation must bump `drillRefresh`.**
+  `/sessions` renders through `FolderDrill`, whose `folderSessions` state only refetches when its
+  `refreshKey` prop bumps. `bulkDeleteSessions` refreshed the landing `load()` but never bumped the
+  key, so a 204 delete left the row visible until the drill remounted — users read it as "delete is
+  broken". Fix: mirror `moveSelectedToFolder` and `setDrillRefresh(n => n + 1)` after deletes, and
+  verify with a browser click-through (folder-scoped refetch fires, row count drops). General rule:
+  any mutation that can run while a drill is open must bump the same key the move path uses.
+- **2026-09-04 — `make up` never applies personal-branch Dockerfile changes; agent turns fail with a redacted FileNotFoundError.**
+  The local stack runs the GHCR image from `docker-compose.prod.yml` (built by CI from **main**). `make down && make up`
+  only restarts that image, so this branch's claude + stashai install in `backend/Dockerfile` (present on `personal`,
+  never merged to main) was missing from the running container. Local-mode `/agents` then spawns `claude`, gets
+  `FileNotFoundError`, and the blanket handler in `sprite_agent_service._pump_turn` surfaces it as the generic
+  "The agent turn failed. Try again." Diagnosis trail: the DB session history shows the failure ~130ms after the user
+  message with zero tool events; `which claude` in `stash-backend-1` finds nothing. Fix: `make build` after merging
+  main into personal (signpost added to the Makefile); durable fix is merging the Dockerfile block to main. Same class
+  as the 2026-08-05 stash-CLI lesson: local-mode agents need their substrate CLIs baked into the image.
+- **2026-08-05 — Workbench session tabs survive deletion and become dead "breadcrumbs".**
+  The tab strip (`moltchat_workspace` localStorage, `workspace-store.ts`) keeps a `session` tab for
+  every session you open; nothing closed it when the session was deleted, so the deleted session
+  stayed visible in the tab strip and clicking it redirected to a dead page. Also, a session whose
+  transcript 404s (e.g. only a `session_end` event) rendered no header actions at all — no Delete —
+  because `SessionClient.load` failed atomically. Fix: `closeSessionTabs(sessionIds)` helper closed
+  from both delete paths (list bulk delete + detail-page delete), and `load` now renders the detail
+  (with Delete) even when only the transcript fails. General rule: any UI surface that persists a
+  reference to a deleted object must close/revalidate that reference at delete time; and never let
+  one failing sub-request disable every action on the page.
