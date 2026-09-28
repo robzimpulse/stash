@@ -24,6 +24,7 @@ import json
 from dataclasses import dataclass, field
 from uuid import UUID
 
+from ..auth import create_api_key
 from ..config import settings
 from ..database import get_pool
 from ..integrations.storage import _decrypt, _encrypt
@@ -37,6 +38,23 @@ class NeedsAuth(Exception):
 
 class ProviderNotConfigured(Exception):
     """The managed provider (OpenRouter) has no key configured on the server."""
+
+
+# The local harness's stash CLI authenticates with a per-user machine key.
+# Keys are stored hashed (plaintext unrecoverable), so cache the plaintext
+# in-process and mint once per process per user — never once per turn. A
+# celery worker fleet forks at startup, so a user ends up with a handful of
+# "local agent" keys at most, not one per chat message.
+_local_stash_keys: dict[UUID, str] = {}
+
+
+async def _local_stash_key(user_id: UUID) -> str:
+    """The machine key the local-mode harness's stash CLI authenticates with."""
+    token = _local_stash_keys.get(user_id)
+    if token is None:
+        token = await create_api_key(user_id, name="local agent", key_type="machine")
+        _local_stash_keys[user_id] = token
+    return token
 
 
 # provider a user connects → the harness it drives.
@@ -140,9 +158,22 @@ async def resolve(user_id: UUID, prefer_provider: str | None = None) -> RunAuth:
     provider's credential, run it; a managed OpenRouter preference on Pro uses
     the managed GLM. Falls back to the user's default resolution otherwise.
     """
-    # Local dev: the machine's own harness login; inject nothing.
+    # Local dev: the machine's own harness login; inject nothing unless a
+    # local proxy is configured. `_local_exec_stream` strips ANTHROPIC_API_KEY
+    # from the inherited env, so carry the proxy config explicitly so the
+    # child claude reaches the proxy instead of the default Anthropic API.
     if settings.AGENT_EXEC_MODE == "local":
-        return RunAuth(harness=harness_mod.CLAUDE)
+        env: dict[str, str] = {}
+        if settings.ANTHROPIC_BASE_URL:
+            env["ANTHROPIC_BASE_URL"] = settings.ANTHROPIC_BASE_URL
+        if settings.ANTHROPIC_API_KEY:
+            env["ANTHROPIC_API_KEY"] = settings.ANTHROPIC_API_KEY
+        # The harness's stash CLI runs on this box too, but can't inherit the
+        # host's ~/.stash login — give it the backend URL and a user key so
+        # the curator and chat agents can actually read/write Stash.
+        env["STASH_URL"] = settings.STASH_URL
+        env["STASH_API_KEY"] = await _local_stash_key(user_id)
+        return RunAuth(harness=harness_mod.CLAUDE, env=env)
 
     if prefer_provider:
         cred = await _get_credential(user_id, prefer_provider)
