@@ -1,28 +1,42 @@
 # Stash Plugin for Hermes Agent
 
-Streams Hermes Agent (NousResearch `hermes-agent`) sessions to your Stash via
-Hermes shell hooks.
+Streams Hermes Agent (NousResearch `hermes-agent`) sessions to your Stash.
 
 ## Prerequisites
 
 - `stash` CLI installed and signed in (`uv tool install stashai && stash signin`)
-- Hermes Agent ≥ the version that shipped shell hooks in `config.yaml`
+- New Hermes builds: nothing else — the installer drops a native plugin.
+- Old Hermes builds (no `plugins` subcommand): Hermes ≥ the version that
+  shipped shell hooks in `config.yaml`
   (see hermes-agent.nousresearch.com/docs/user-guide/features/hooks)
 
 ## Install
 
 `stash signin` detects Hermes (the `hermes` binary or `~/.hermes/`) and wires
-this plugin automatically (re-running it refreshes the hooks; `stash settings`
+this plugin automatically (re-running it refreshes the install; `stash settings`
 can toggle agents later).
 
-The installer writes the `hooks` entries from `config.snippet.yaml` into
-`~/.hermes/config.yaml` inside a `# stash-plugin:begin` / `# stash-plugin:end`
-marker block, preserving everything else in the file. If your config already
-has its own top-level `hooks:` block the installer refuses (duplicate YAML keys
-would silently drop one of the blocks) — add the snippet entries to your
-existing block by hand instead.
+**New Hermes builds (native plugin):** the installer copies `plugin/` to
+`~/.hermes/plugins/stash/` and enables it through Hermes' own
+`plugins.enabled` allow-list (`hermes plugins enable stash`). The five session
+hooks are registered in-process; each one forwards the event to
+`stash hook run hermes <event>` — the same scripts, same streaming behavior as
+before. Restart Hermes (or run `hermes gateway restart`) to load it. No
+config.yaml hook entries, no per-hook approval prompts.
 
-### Approve the hooks (required)
+Upgrading from a shell-hook install is automatic: the installer removes the old
+`# stash-plugin:begin/end` marker block from `config.yaml` in the same run, so
+events never stream twice.
+
+**Old Hermes builds (shell hooks):** the installer writes the `hooks` entries
+from `config.snippet.yaml` into `~/.hermes/config.yaml` inside a
+`# stash-plugin:begin` / `# stash-plugin:end` marker block, preserving
+everything else in the file. If your config already has its own top-level
+`hooks:` block the installer refuses (duplicate YAML keys would silently drop
+one of the blocks) — add the snippet entries to your existing block by hand
+instead.
+
+### Approve the hooks (shell-hook installs only)
 
 Hermes asks for one-time approval per `(event, command)` pair the first time a
 hook fires; approvals persist in `~/.hermes/shell-hooks-allowlist.json`.
@@ -49,10 +63,10 @@ always answer `{}` and send any warnings to stderr (Hermes logs).
 
 ## Agent context
 
-Hermes has no global context file (only project-level `HERMES.md`/`AGENTS.md`
-and the `SOUL.md` personality file, which we never touch). To teach the agent
-about the `stash` CLI, copy the block in `HERMES.md` into your project's
-`HERMES.md` or `AGENTS.md`.
+New installs ship a native skill: `skill_view("stash:stash")` (or
+`skills_list` → category `plugin`) teaches the agent the `stash` CLI — no
+manual copy step. Old Hermes builds: copy the block in `HERMES.md` into your
+project's `HERMES.md` or `AGENTS.md`.
 
 ## Commands
 
@@ -60,7 +74,7 @@ Everything is a plain `stash` CLI subcommand — no Hermes-specific commands:
 
 | Command | Description |
 |---------|-------------|
-| `stash signin` | Interactive setup (auth + hook install) |
+| `stash signin` | Interactive setup (auth + install) |
 | `stash settings` | Interactive settings page (streaming, endpoint, …) |
 | `stash stop` | Pause session recording across every installed plugin (`stash start` resumes) |
 
