@@ -1,17 +1,24 @@
 /**
- * Stash plugin for opencode.
+ * Stash plugin for opencode — dual-compatible with V1 and V2.
  *
  * Thin TS shim: each opencode event handler serializes its input and pipes it
  * into `stash hook run opencode <event>` via stdin. The hook scripts ship
  * inside the stashai package and run under its Python, reused from every
- * other agent's plugin.
+ * other agent's plugin. The outbound JSON contract (consumed by
+ * scripts/adapt.py) is identical on both host versions.
  *
- * Bus events (session.*, message.*, file.*, etc.) are delivered through the
- * single `event` hook, NOT as keyed properties. Only the explicit allow-list
- * in opencode's `Hooks` interface (chat.message, tool.execute.*, etc.) is
- * dispatched by key.
+ * Loading paths:
+ * - V2 (opencode 2.x): the supervisor reads the default export `{id, setup}`
+ *   and calls `setup(ctx)`. Hooks are registered on domain objects
+ *   (`ctx.session.hook("prompt")`, `ctx.tool.hook("execute.after")`) and bus
+ *   events arrive through `ctx.event.subscribe()`.
+ * - V1 (opencode 1.x): named export `StashPlugin` (keyed-hook return shape).
+ *   V1 hosts may also probe `default.setup` with a V1-shaped ctx — setup
+ *   detects the missing domains and returns quietly.
  *
- * Install: reference this file from your opencode `plugin` config. See README.
+ * Install: V1 — reference this file from the `plugin` config key. V2 — drop
+ * it into a project's `.opencode/plugins/` directory (2.0.18 ignores
+ * configured local directory entries). See README.
  */
 
 import { spawn } from "node:child_process";
@@ -150,4 +157,118 @@ export const StashPlugin = async ({
   };
 };
 
-export default StashPlugin;
+// ---------------------------------------------------------------------------
+// V2 (opencode 2.x) plugin definition.
+// ---------------------------------------------------------------------------
+
+type V2Event = { type: string; data?: any };
+
+// Structural subset of the V2 plugin context (@opencode/plugin). Inline on
+// purpose: the plugin ships with zero npm dependencies, like every other
+// agent shim in this repo.
+type V2Ctx = {
+  location?: { directory?: string };
+  session?: { hook?: (name: string, cb: (event: any) => any) => Promise<unknown> };
+  tool?: { hook?: (name: string, cb: (event: any) => any) => Promise<unknown> };
+  event?: { subscribe?: (options?: { signal?: AbortSignal }) => AsyncIterable<V2Event> };
+};
+
+async function setup(ctx: V2Ctx): Promise<() => void> {
+  // V1 hosts (~1.18.x) also invoke default.setup with a V1-shaped ctx that
+  // lacks the V2 domain methods — V1 is served by the named export instead.
+  const session = ctx?.session;
+  const tool = ctx?.tool;
+  const events = ctx?.event;
+  if (
+    typeof session?.hook !== "function" ||
+    typeof tool?.hook !== "function" ||
+    typeof events?.subscribe !== "function"
+  ) {
+    return () => {};
+  }
+
+  // V2 runs one shared service for every project, so this instance's own
+  // location is only the fallback cwd; session.created reports each
+  // session's real directory. The service is long-lived, so bound the map by
+  // dropping the oldest quarter when it fills (Map iterates insertion order).
+  const instanceCwd = ctx.location?.directory ?? "";
+  const sessionDirs = new Map<string, string>();
+  const cwdFor = (sid: string): string => sessionDirs.get(sid) ?? instanceCwd;
+
+  // V2 equivalent of chat.message: fires once per admitted user prompt,
+  // before it enters the session inbox.
+  await session.hook!("prompt", (event: any) => {
+    const sid = event?.sessionID ?? "";
+    activeCwd = cwdFor(sid);
+    runHook("on_prompt", { session_id: sid, prompt: event?.prompt?.text ?? "", cwd: activeCwd });
+    scheduleIdleEnd(sid);
+  });
+
+  // V2 equivalent of tool.execute.after: one mutable event carries the call
+  // input plus either the completed result or the error.
+  await tool.hook!("execute.after", (event: any) => {
+    const sid = event?.sessionID ?? "";
+    activeCwd = cwdFor(sid);
+    const toolResponse =
+      event?.status === "completed" ? event?.result ?? {} : { error: event?.error };
+    runHook("on_tool_use", {
+      session_id: sid,
+      tool_name: event?.tool ?? "",
+      tool_input: event?.input ?? {},
+      tool_response: toolResponse,
+      cwd: activeCwd,
+    });
+    scheduleIdleEnd(sid);
+  });
+
+  // Bus events, V2 shape: {type, data: {sessionID, ...}}.
+  const controller = new AbortController();
+  void (async () => {
+    for await (const ev of events.subscribe!({ signal: controller.signal })) {
+      const sid = ev?.data?.sessionID ?? "";
+      switch (ev?.type) {
+        case "session.created": {
+          const dir = ev?.data?.location?.directory ?? "";
+          if (sid && dir) {
+            if (sessionDirs.size >= 512) {
+              let drop = 128;
+              for (const key of sessionDirs.keys()) {
+                if (drop-- <= 0) break;
+                sessionDirs.delete(key);
+              }
+            }
+            sessionDirs.set(sid, dir);
+          }
+          activeCwd = dir || instanceCwd;
+          runHook("on_session_start", { session_id: sid, cwd: activeCwd }, true);
+          scheduleIdleEnd(sid);
+          break;
+        }
+        case "session.deleted": {
+          const cwd = cwdFor(sid);
+          sessionDirs.delete(sid);
+          runHook("on_session_end", { session_id: sid, cwd });
+          cancelIdleEnd();
+          break;
+        }
+        case "session.idle": {
+          // session.idle fires every turn completion — refresh the idle timer
+          // so the 10-min countdown only fires after real inactivity.
+          scheduleIdleEnd(activeSessionId);
+          break;
+        }
+      }
+    }
+  })();
+
+  return () => {
+    controller.abort();
+    cancelIdleEnd();
+  };
+}
+
+/**
+ * Default export: V2 reads {id, setup}; V1 (1.18.29+) reads server(), and
+ * older V1 hosts discover the StashPlugin named export.
+ */
+export default { id: "stash", server: StashPlugin, setup };
