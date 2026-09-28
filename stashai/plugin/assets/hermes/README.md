@@ -24,6 +24,16 @@ hooks are registered in-process; each one forwards the event to
 before. Restart Hermes (or run `hermes gateway restart`) to load it. No
 config.yaml hook entries, no per-hook approval prompts.
 
+You can also install straight from this repo without `stash signin`:
+
+```
+hermes plugins install https://github.com/robzimpulse/stash#plugins/hermes-plugin/plugin
+```
+
+(The `#subdir` fragment matters: the repo root is the whole app; the plugin
+lives at that subdirectory. The `stash` CLI must still be installed and signed
+in — the plugin shells out to it.)
+
 Upgrading from a shell-hook install is automatic: the installer removes the old
 `# stash-plugin:begin/end` marker block from `config.yaml` in the same run, so
 events never stream twice.
