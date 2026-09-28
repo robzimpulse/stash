@@ -22,9 +22,11 @@ _TOOL_MAP = {
     "write": "write",
     "read": "read",
     "bash": "bash",
+    "shell": "bash",  # opencode v2 renamed bash -> shell
     "glob": "glob",
     "grep": "grep",
     "task": "agent",
+    "subagent": "agent",  # opencode v2 renamed task -> subagent
     "agent": "agent",
     "webfetch": "webfetch",
     "websearch": "websearch",
