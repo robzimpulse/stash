@@ -50,6 +50,13 @@ services:
     volumes:
       - ${STASH_DATA_DIR:-./data}/secrets:/app/.secrets
 
+  reward-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    volumes:
+      - ${STASH_DATA_DIR:-./data}/secrets:/app/.secrets
+
   beat:
     build:
       context: .
