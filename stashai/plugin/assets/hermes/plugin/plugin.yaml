@@ -1,0 +1,10 @@
+name: stash
+version: "1.0"
+description: Streams Hermes sessions to your Stash (session recording, search, skills)
+author: Fergana-Labs
+provides_hooks:
+  - on_session_start
+  - pre_llm_call
+  - post_tool_call
+  - post_llm_call
+  - on_session_end

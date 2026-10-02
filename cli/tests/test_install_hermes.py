@@ -24,6 +24,8 @@ _HOOK_EVENTS = (
 def _run_install(monkeypatch, tmp_path: Path) -> tuple[str, str]:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    # These tests pin the legacy shell-hook wiring used on old Hermes builds.
+    monkeypatch.setattr("cli.main._hermes_supports_native_plugins", lambda: False)
     return _install_hermes(False)
 
 
