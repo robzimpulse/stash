@@ -42,6 +42,45 @@ def _fake_github(monkeypatch, files: dict[str, bytes], branch: str = "main") -> 
     monkeypatch.setattr(gsi, "_fetch_blob", fake_blob)
 
 
+def _fake_tarball(monkeypatch, files: dict[str, bytes]) -> None:
+    """Serve `files` as a GitHub-style tarball: one wrapping top-level dir."""
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for path, blob in files.items():
+            info = tarfile.TarInfo(f"acme-skills-abc123/{path}")
+            info.size = len(blob)
+            tar.addfile(info, io.BytesIO(blob))
+
+    async def fake_tarball(client, owner, repo, token=None):
+        return buf.getvalue()
+
+    monkeypatch.setattr(gsi, "_fetch_tarball", fake_tarball)
+
+
+def test_extract_tarball_strips_wrapper_and_skips_unsafe_entries():
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, blob in {
+            "w/a/b.md": b"ok",
+            "w/../evil.md": b"x",
+            "w/top.txt": b"t",
+        }.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(blob)
+            tar.addfile(info, io.BytesIO(blob))
+        link = tarfile.TarInfo("w/link")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "a/b.md"
+        tar.addfile(link)
+    assert sorted(gsi._extract_tarball(buf.getvalue())) == [("a/b.md", b"ok"), ("top.txt", b"t")]
+
+
 async def _import_repo(repo_url: str) -> list[str]:
     owner_user_id, owner_id = await gsi.ensure_curator()
     results = []
@@ -218,7 +257,7 @@ async def test_import_repo_for_user_copies_whole_repo(client: AsyncClient, pool,
 
     from .conftest import unique_name
 
-    _fake_github(monkeypatch, FAKE_REPO)
+    _fake_tarball(monkeypatch, FAKE_REPO)
     reg = await client.post(
         "/api/v1/users/register",
         json={"name": unique_name("importer"), "password": "securepassword1"},
