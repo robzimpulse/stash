@@ -17,10 +17,13 @@ Two flavors:
 
 from __future__ import annotations
 
+import asyncio
+import io
 import logging
 import os
 import re
 import secrets
+import tarfile
 from uuid import UUID
 
 import httpx
@@ -163,29 +166,44 @@ async def fetch_repo_skills(repo_url: str) -> list[dict]:
         return skills
 
 
+async def _fetch_tarball(
+    client: httpx.AsyncClient, owner: str, repo: str, token: str | None = None
+) -> bytes:
+    """The whole default-branch snapshot as one gzipped tar: one request
+    instead of one per file, which is what keeps large repos importable."""
+    resp = await client.get(f"{_API}/repos/{owner}/{repo}/tarball", headers=_api_headers(token))
+    resp.raise_for_status()
+    return resp.content
+
+
+def _extract_tarball(data: bytes) -> list[tuple[str, bytes]]:
+    """Regular files from a GitHub tarball as (path relative to the repo root,
+    bytes). GitHub wraps everything in one `<owner>-<repo>-<sha>/` directory,
+    which is stripped. Symlinks, unsafe paths and oversized files are skipped."""
+    files: list[tuple[str, bytes]] = []
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        for member in tar:
+            if not member.isfile():
+                continue
+            _top, _, rel = member.name.partition("/")
+            if not rel or rel.startswith("/") or ".." in rel.split("/"):
+                continue
+            if member.size > MAX_FILE_BYTES:
+                logger.warning("skipping oversized file %s (%s bytes)", rel, member.size)
+                continue
+            fh = tar.extractfile(member)
+            if fh is not None:
+                files.append((rel, fh.read()))
+    return files
+
+
 async def fetch_repo_files(repo_url: str, token: str | None = None) -> tuple[str, list]:
-    """Every blob in a repo, paths relative to the repo root.
-    Returns (repo name, [(path, bytes)])."""
+    """Every file in a repo, paths relative to the repo root, from a single
+    tarball download. Returns (repo name, [(path, bytes)])."""
     owner, repo = parse_repo_url(repo_url)
-    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
-        branch = await _fetch_default_branch(client, owner, repo, token)
-        tree = await _fetch_tree(client, owner, repo, branch, token)
-        files = []
-        for entry in tree:
-            if entry["type"] != "blob":
-                continue
-            if entry.get("size", 0) > MAX_FILE_BYTES:
-                logger.warning(
-                    "skipping oversized file %s (%s bytes)", entry["path"], entry["size"]
-                )
-                continue
-            files.append(
-                (
-                    entry["path"],
-                    await _fetch_blob(client, owner, repo, branch, entry["path"], token),
-                )
-            )
-        return repo, files
+    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+        data = await _fetch_tarball(client, owner, repo, token)
+    return repo, await asyncio.to_thread(_extract_tarball, data)
 
 
 async def inspect_repo(repo_url: str, token: str | None = None) -> list[str]:
