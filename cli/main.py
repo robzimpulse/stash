@@ -689,8 +689,71 @@ _HERMES_APPROVAL_NOTE = (
 )
 
 
+def _hermes_supports_native_plugins() -> bool:
+    """True when the installed `hermes` CLI has the `plugins` subcommand.
+
+    Exit code, not version-string parsing: old builds fail with a usage
+    error and a non-zero exit, which is the whole signal we need.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["hermes", "plugins", "list"], capture_output=True, text=True, timeout=30
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _remove_legacy_hermes_marker_block(cfg_path: Path) -> None:
+    """Strip the stash-owned marker-comment block, preserving the rest."""
+    existing = cfg_path.read_text()
+    if _HERMES_MARKER_BEGIN not in existing or _HERMES_MARKER_END not in existing:
+        return
+    pre, rest = existing.split(_HERMES_MARKER_BEGIN, 1)
+    _, post = rest.split(_HERMES_MARKER_END, 1)
+    # Drop the newline that preceded the marker so we don't leave a blank gap.
+    if pre.endswith("\n") and post.startswith("\n"):
+        pre = pre[:-1]
+    cfg_path.write_text(f"{pre}{post}")
+
+
+def _install_hermes_native() -> tuple[str, str]:
+    """Drop the native plugin into ~/.hermes/plugins/stash/ (byte-exact copy).
+
+    The plugin install is the trust decision: no config.yaml hooks, no
+    per-hook approval. User plugins are opt-in through Hermes' own
+    `plugins.enabled` allow-list, so enabling goes through its CLI (one
+    writer for that config). Leaving a legacy marker block wired alongside
+    would stream every event twice, so it is removed in the same shot.
+    """
+    import subprocess
+
+    src = _assets_dir("hermes") / "plugin"
+    dest = Path.home() / ".hermes" / "plugins" / "stash"
+
+    if dest.is_dir() and _dir_content_matches(src, dest):
+        return ("skipped", f"{dest} (native plugin up to date)")
+
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(src, dest)
+
+    # opt-in allow-list: Hermes refuses to load user plugins not in plugins.enabled
+    subprocess.run(
+        ["hermes", "plugins", "enable", "stash"], capture_output=True, text=True, timeout=60
+    )
+
+    cfg_path = Path.home() / ".hermes" / "config.yaml"
+    if cfg_path.exists():
+        _remove_legacy_hermes_marker_block(cfg_path)
+
+    return ("installed", f"{dest} (restart Hermes to load the plugin)")
+
+
 def _install_hermes(force: bool) -> tuple[str, str]:
-    """Wire the stash shell hooks into ~/.hermes/config.yaml.
+    """Wire stash into Hermes: native plugin on new builds, shell hooks on old.
 
     The hooks block lives inside a stash-owned marker-comment block so re-runs
     replace it wholesale without touching user config. We deliberately don't
@@ -699,6 +762,9 @@ def _install_hermes(force: bool) -> tuple[str, str]:
     so that case fails loud with a merge-by-hand message.
     """
     import re
+
+    if _hermes_supports_native_plugins():
+        return _install_hermes_native()
 
     root = _assets_dir("hermes")
     cfg_path = Path.home() / ".hermes" / "config.yaml"
@@ -912,6 +978,8 @@ def _plugin_installed(agent: str) -> bool:
     if agent == "openclaw":
         return _openclaw_extension_dir().is_dir()
     if agent == "hermes":
+        if (Path.home() / ".hermes" / "plugins" / "stash" / "plugin.yaml").is_file():
+            return True
         cfg_path = Path.home() / ".hermes" / "config.yaml"
         if not cfg_path.exists():
             return False
