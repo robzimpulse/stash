@@ -11,10 +11,32 @@ from backend.services import harness as h
 
 
 @pytest.mark.asyncio
-async def test_local_mode_uses_claude_no_injection(monkeypatch):
+async def test_local_mode_uses_claude_with_stash_cli_credentials(monkeypatch):
+    """Local-mode turns run on the backend's own box, so the harness gets the
+    stash CLI's config as env: the backend URL plus a per-user machine key
+    minted once and reused across turns (the sprite seed writes the same
+    config for cloud boxes)."""
     monkeypatch.setattr(settings, "AGENT_EXEC_MODE", "local")
-    auth = await agent_auth.resolve(uuid.uuid4())
-    assert auth.harness is h.CLAUDE and auth.env == {} and auth.files == {}
+
+    minted: list[uuid.UUID] = []
+
+    async def fake_create_api_key(user_id, name="", key_type="", access=""):
+        minted.append(user_id)
+        return "st_local_testkey"
+
+    monkeypatch.setattr(agent_auth, "create_api_key", fake_create_api_key)
+
+    uid = uuid.uuid4()
+    auth = await agent_auth.resolve(uid)
+    assert auth.harness is h.CLAUDE
+    assert auth.files == {}
+    assert auth.env["STASH_URL"] == settings.STASH_URL
+    assert auth.env["STASH_API_KEY"] == "st_local_testkey"
+    assert len(minted) == 1
+
+    # A second turn for the same user reuses the cached key, no re-mint.
+    await agent_auth.resolve(uid)
+    assert len(minted) == 1
 
 
 @pytest.mark.asyncio
