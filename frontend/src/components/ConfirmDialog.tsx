@@ -1,5 +1,14 @@
 "use client";
 
+/**
+ * ConfirmDialog — app-wide promise-based confirm modal.
+ * Usage: `const confirm = useConfirm(); if (await confirm({ title, body })) ...`
+ * under <ConfirmDialogProvider>. The overlay sets `pointer-events-auto` because
+ * it renders outside any Radix portal: when opened from inside a Radix modal
+ * (e.g. Import from GitHub), body is `pointer-events: none` and clicks would
+ * otherwise fall through, leaving the dialog unclickable.
+ */
+
 import {
   createContext,
   useCallback,
@@ -50,7 +59,7 @@ export function ConfirmDialogProvider({ children }: { children: ReactNode }) {
       {children}
       {options && (
         <div
-          className="fixed inset-0 z-[60] flex cursor-pointer items-center justify-center bg-black/30 px-4"
+          className="pointer-events-auto fixed inset-0 z-[60] flex cursor-pointer items-center justify-center bg-black/30 px-4"
           onClick={() => settle(false)}
         >
           <div
