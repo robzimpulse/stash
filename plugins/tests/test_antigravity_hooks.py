@@ -208,10 +208,12 @@ def test_first_sight_prunes_stale_conversations(ag) -> None:
     assert not old.exists() and recent.exists() and (ag.root / "new").exists()
 
 
-@pytest.mark.parametrize("script", ["on_sync"])
+@pytest.mark.parametrize("script", ["on_sync", "on_stop"])
 def test_main_prints_exactly_empty_object(ag, monkeypatch, capsys, script) -> None:
     t = ag.tmp / "t.jsonl"
     append(t, *TURN)
+    if script == "on_stop":
+        _capture_uploads(ag, monkeypatch)
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload("c1", t))))
     getattr(ag, script).main()
     assert capsys.readouterr().out == "{}\n"
@@ -224,4 +226,50 @@ def test_main_prints_empty_object_even_on_crash(ag, monkeypatch, capsys) -> None
     monkeypatch.setattr(ag.on_sync, "run", boom)
     monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
     ag.on_sync.main()
+    assert capsys.readouterr().out == "{}\n"
+
+
+def _capture_uploads(ag, monkeypatch) -> list[dict]:
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        ag.on_stop, "spawn_transcript_upload", lambda **kw: calls.append(kw) or True
+    )
+    return calls
+
+
+def test_idle_stop_uploads_transcript(ag, monkeypatch) -> None:
+    calls = _capture_uploads(ag, monkeypatch)
+    t = ag.tmp / "t.jsonl"
+    append(t, *TURN)
+    ag.on_stop.finish(payload("c1", t, fullyIdle=True, terminationReason="model_stop"))
+    assert kinds(ag.client) == ["user_message", "tool_use", "assistant_message"]
+    assert len(calls) == 1
+    assert calls[0]["data_dir"] == ag.root / "c1"
+    assert calls[0]["session_id"] == "c1"
+    assert calls[0]["transcript_path"] == str(t)
+    assert calls[0]["cwd"] == "/repo"
+
+
+def test_non_idle_stop_skips_upload(ag, monkeypatch) -> None:
+    calls = _capture_uploads(ag, monkeypatch)
+    t = ag.tmp / "t.jsonl"
+    append(t, *TURN)
+    ag.on_stop.finish(payload("c1", t, fullyIdle=False))
+    assert calls == []
+
+
+def test_stop_without_session_row_skips_upload(ag, monkeypatch) -> None:
+    calls = _capture_uploads(ag, monkeypatch)
+    monkeypatch.setattr(ag.on_sync, "uploads_enabled", lambda cfg: False)
+    ag.on_stop.finish(payload("c1", ag.tmp / "t.jsonl", fullyIdle=True))
+    assert calls == []
+
+
+def test_stop_main_prints_empty_object_even_on_crash(ag, monkeypatch, capsys) -> None:
+    def boom(_payload):
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(ag.on_stop, "finish", boom)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
+    ag.on_stop.main()
     assert capsys.readouterr().out == "{}\n"
