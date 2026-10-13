@@ -1,0 +1,11 @@
+{
+  "_documentation": "Antigravity Stop hook stdin fixture. Purpose: Stop fires when the agent loop ends a turn; on_stop runs a final on_sync, then - only when fullyIdle is true and the conversation has a Stash session row - spawns the detached transcript upload. Usage: piped to `stash hook run antigravity on_stop` by test_hook_scripts_execute.py; the leading _documentation key is not a real payload field and is ignored by the hook parser.",
+  "conversationId": "ag-1",
+  "workspacePaths": ["/Users/alice/repo"],
+  "transcriptPath": "/Users/alice/.gemini/antigravity/brain/ag-1/.system_generated/logs/transcript.jsonl",
+  "artifactDirectoryPath": "/Users/alice/.gemini/antigravity/brain/ag-1",
+  "modelName": "auto",
+  "executionNum": 1,
+  "terminationReason": "model_stop",
+  "fullyIdle": true
+}

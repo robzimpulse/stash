@@ -5,6 +5,9 @@ everything before it is captured in git history (`git log`), not here.
 
 ## Unreleased
 
+- Add a standalone Antigravity plugin that streams prompts, tool calls, assistant
+  replies, and idle transcript snapshots to Stash.
+
 - Bring in intuition models with a playground, prediction inbox, editable
   examples and rubrics, and evaluated model versions. Click a trained reward
   model to score or compare responses using its saved checkpoint, revisit run

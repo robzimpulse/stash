@@ -1,0 +1,30 @@
+{
+  "stash": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "stash hook run antigravity on_sync",
+        "timeout": 5
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "stash hook run antigravity on_sync",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "stash hook run antigravity on_stop",
+        "timeout": 10
+      }
+    ]
+  }
+}
