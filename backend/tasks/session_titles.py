@@ -93,7 +93,9 @@ async def _generate_title(source: str) -> str:
         messages=[{"role": "user", "content": f"<transcript>\n{source}\n</transcript>"}],
     )
     text = "\n".join(
-        block.text for block in response.content if getattr(block, "type", "") == "text"
+        block.text
+        for block in (response.content or [])
+        if getattr(block, "type", "") == "text"
     )
     return _clean_title(text)
 
