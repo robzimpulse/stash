@@ -1,0 +1,10 @@
+{
+  "_documentation": "Antigravity PreInvocation/PostToolUse hook stdin fixture. Purpose: Antigravity sends this payload on each invocation and tool use; on_sync tails transcriptPath from a saved byte offset, streams the new steps, and creates the Stash session row on first sight of conversationId. Usage: piped to `stash hook run antigravity on_sync` by test_hook_scripts_execute.py; the leading _documentation key is not a real payload field and is ignored by the hook parser.",
+  "conversationId": "ag-1",
+  "workspacePaths": ["/Users/alice/repo"],
+  "transcriptPath": "/Users/alice/.gemini/antigravity/brain/ag-1/.system_generated/logs/transcript.jsonl",
+  "artifactDirectoryPath": "/Users/alice/.gemini/antigravity/brain/ag-1",
+  "modelName": "auto",
+  "invocationNum": 1,
+  "initialNumSteps": 0
+}
