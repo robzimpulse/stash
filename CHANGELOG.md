@@ -32,6 +32,9 @@ everything before it is captured in git history (`git log`), not here.
 - Replace the marketing homepage with a concise verifier research introduction,
   a Fergana-inspired interactive valley, and matching social previews.
 
+- Add a standalone Antigravity plugin that streams prompts, tool calls, assistant
+  replies, and idle transcript snapshots to Stash.
+
 - Bring in intuition models with a playground, prediction inbox, editable
   examples and rubrics, and evaluated model versions. Click a trained reward
   model to score or compare responses using its saved checkpoint, revisit run
