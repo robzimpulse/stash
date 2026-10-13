@@ -234,7 +234,16 @@ def _browser_auth_flow(
 # Install — wire up hook plugins for every coding agent on PATH
 # ===========================================================================
 
-_SUPPORTED_AGENTS = ("claude", "cursor", "codex", "opencode", "gemini", "openclaw", "hermes")
+_SUPPORTED_AGENTS = (
+    "claude",
+    "cursor",
+    "codex",
+    "opencode",
+    "gemini",
+    "antigravity",
+    "openclaw",
+    "hermes",
+)
 
 _AGENT_BINARY = {
     "claude": "claude",
@@ -242,6 +251,7 @@ _AGENT_BINARY = {
     "codex": "codex",
     "opencode": "opencode",
     "gemini": "gemini",
+    "antigravity": "agy",
     "openclaw": "openclaw",
     "hermes": "hermes",
 }
@@ -334,6 +344,10 @@ def _agent_present(agent: str) -> bool:
         return (Path.home() / ".cursor").is_dir()
     if agent == "gemini":
         return (Path.home() / ".gemini").is_dir()
+    if agent == "antigravity":
+        # ~/.gemini/antigravity holds Antigravity's conversations; a bare
+        # ~/.gemini only proves Gemini CLI.
+        return (Path.home() / ".gemini" / "antigravity").is_dir()
     if agent == "hermes":
         return (Path.home() / ".hermes").is_dir()
     # Openclaw needs its binary for `openclaw plugins install`, so a config
@@ -812,6 +826,30 @@ def _dir_content_matches(src: Path, dest: Path) -> bool:
     return True
 
 
+def _install_antigravity(force: bool) -> tuple[str, str]:
+    """Drop the native Antigravity plugin into ~/.gemini/config/plugins/stash/.
+
+    Antigravity does not run ~/.gemini/settings.json hooks, so the plugin's own
+    hooks.json is the only wiring (and Gemini CLI hooks never double-stream).
+    The copy is byte-exact; re-runs skip unless files drifted or `force`.
+    The Stash context block goes into ~/.gemini/GEMINI.md — marker-keyed and
+    shared with the Gemini CLI installer, so the file keeps exactly one block.
+    Hooks load when a conversation starts, hence the detail message.
+    """
+    root = _assets_dir("antigravity")
+    src = root / "plugin"
+    dest = Path.home() / ".gemini" / "config" / "plugins" / "stash"
+    _upsert_agents_md(Path.home() / ".gemini" / "GEMINI.md", (root / "GEMINI.md").read_text())
+
+    if not force and dest.is_dir() and _dir_content_matches(src, dest):
+        return ("skipped", f"{dest} (plugin up to date)")
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dest)
+    return ("installed", f"{dest} (start a new Antigravity conversation to load hooks)")
+
+
 _OPENCLAW_MIN_VERSION = (2026, 4, 0)
 
 
@@ -872,6 +910,7 @@ _INSTALLERS = {
     "codex": _install_codex,
     "opencode": _install_opencode,
     "gemini": _install_gemini,
+    "antigravity": _install_antigravity,
     "openclaw": _install_openclaw,
     "hermes": _install_hermes,
 }
@@ -885,6 +924,7 @@ hook_app = typer.Typer(help="Hook plumbing invoked by coding agents. Not for int
 app.add_typer(hook_app, name="hook", hidden=True)
 
 _HOOK_EVENTS = {
+    "antigravity": ("on_sync", "on_stop"),
     "claude": ("on_session_start", "on_prompt", "on_tool_use", "on_stop", "on_session_end"),
     "codex": ("on_session_start", "on_prompt", "on_tool_use", "on_stop"),
     "cursor": (
@@ -976,6 +1016,8 @@ def _plugin_installed(agent: str) -> bool:
             return "stashai/plugin/assets/gemini" in settings_path.read_text()
         except OSError:
             return False
+    if agent == "antigravity":
+        return (Path.home() / ".gemini" / "config" / "plugins" / "stash" / "plugin.json").is_file()
     if agent == "openclaw":
         return _openclaw_extension_dir().is_dir()
     if agent == "hermes":
@@ -4727,6 +4769,7 @@ _AGENT_LABEL = {
     "codex": "Codex",
     "opencode": "opencode",
     "gemini": "Gemini CLI",
+    "antigravity": "Antigravity",
     "openclaw": "Openclaw",
     "hermes": "Hermes",
 }
@@ -5833,6 +5876,7 @@ PLUGIN_DATA_DIRS = {
     "codex": Path.home() / ".stash/plugins/codex",
     "cursor": Path.home() / ".stash/plugins/cursor",
     "gemini": Path.home() / ".stash/plugins/gemini",
+    "antigravity": Path.home() / ".stash/plugins/antigravity",
     "opencode": Path.home() / ".stash/plugins/opencode",
     "openclaw": Path.home() / ".stash/plugins/openclaw",
     "hermes": Path.home() / ".stash/plugins/hermes",
