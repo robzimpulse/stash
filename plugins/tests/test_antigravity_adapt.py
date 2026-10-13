@@ -172,3 +172,12 @@ def test_read_new_lines_resets_when_file_shrinks(tmp_path: Path) -> None:
 
 def test_read_new_lines_missing_file_keeps_offset(tmp_path: Path) -> None:
     assert adapt.read_new_lines(str(tmp_path / "nope.jsonl"), 5) == ([], 5)
+
+
+def test_read_new_lines_splits_only_on_lf_bytes(tmp_path: Path) -> None:
+    # Raw U+2028 inside a JSON string is not a record boundary; the whole
+    # record must stay one line and the offset must advance past its LF.
+    path = tmp_path / "t.jsonl"
+    record = json.dumps({"content": "a\u2028b"}, ensure_ascii=False)
+    path.write_bytes(record.encode("utf-8") + b"\n")
+    assert adapt.read_new_lines(str(path), 0) == ([record], len(record.encode("utf-8")) + 1)
