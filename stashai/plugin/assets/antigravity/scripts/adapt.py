@@ -75,8 +75,14 @@ def read_new_lines(path: str, offset: int) -> tuple[list[str], int]:
     end = chunk.rfind(b"\n")
     if end < 0:
         return [], offset
-    text = chunk[: end + 1].decode("utf-8", errors="replace")
-    return [line for line in text.splitlines() if line.strip()], offset + end + 1
+    # Split the raw bytes on LF only: str.splitlines() would also break on
+    # U+2028/U+0085/U+2029, which occur inside JSON string content.
+    lines = [
+        line.decode("utf-8", errors="replace")
+        for line in chunk[: end + 1].split(b"\n")
+        if line.strip()
+    ]
+    return lines, offset + end + 1
 
 
 def _decode(value):
