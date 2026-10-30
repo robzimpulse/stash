@@ -23,6 +23,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 # Mirrors _HOOK_EVENTS in cli/main.py; test_hook_cli.py asserts the CLI table
 # matches the script files these entries point at.
 _AGENT_EVENTS = {
+    "antigravity": ("on_sync", "on_stop"),
     "claude": ("on_session_start", "on_prompt", "on_tool_use", "on_stop", "on_session_end"),
     "codex": ("on_session_start", "on_prompt", "on_tool_use", "on_stop"),
     "cursor": (
@@ -40,6 +41,7 @@ _AGENT_EVENTS = {
 
 # Each agent's DATA_DIR env var (see each plugin's scripts/config.py).
 _DATA_DIR_ENV = {
+    "antigravity": "STASH_ANTIGRAVITY_DATA",
     "claude": "CLAUDE_PLUGIN_DATA",
     "codex": "STASH_CODEX_DATA",
     "cursor": "STASH_CURSOR_DATA",
@@ -62,14 +64,15 @@ def test_hook_script_executes(agent, event, monkeypatch, tmp_path: Path) -> None
     scripts_dir = PLUGINS_DIR / f"{agent}-plugin" / "scripts"
     monkeypatch.syspath_prepend(str(scripts_dir))
 
-    # The scripts import flat sibling modules (`adapt`, `config`); drop any
-    # cached copy so each run binds this plugin's modules and this test's env.
-    for mod in ("adapt", "config"):
+    # The scripts import flat sibling modules (`adapt`, `config`, and on_stop
+    # also imports `on_sync`); drop any cached copy so each run binds this
+    # plugin's modules and this test's env.
+    for mod in ("adapt", "config", "on_sync"):
         sys.modules.pop(mod, None)
     try:
         runpy.run_path(str(scripts_dir / f"{event}.py"), run_name="__main__")
     finally:
-        for mod in ("adapt", "config"):
+        for mod in ("adapt", "config", "on_sync"):
             sys.modules.pop(mod, None)
 
 
